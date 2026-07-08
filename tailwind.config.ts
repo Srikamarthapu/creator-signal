@@ -5,24 +5,24 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#15201f",
-        muted: "#60716f",
-        line: "#dce4e2",
-        mist: "#f4f8f7",
+        ink: "#1f1f1d",
+        muted: "#77746d",
+        line: "#dedbd4",
+        mist: "#f3f1ed",
         signal: {
-          50: "#edfdf9",
-          100: "#d0f7ef",
-          500: "#15957f",
-          600: "#0f766e",
-          700: "#115e59",
-          900: "#103b37"
+          50: "#f6f5f2",
+          100: "#e8e4dc",
+          500: "#6f655a",
+          600: "#4b4640",
+          700: "#302f2c",
+          900: "#20201e"
         },
         caution: "#9a6700",
         danger: "#b42318"
       },
       boxShadow: {
-        panel: "0 12px 35px rgba(19, 32, 31, 0.08)",
-        popover: "0 24px 70px rgba(19, 32, 31, 0.2)"
+        panel: "0 18px 50px rgba(42, 39, 34, 0.08)",
+        popover: "0 24px 70px rgba(42, 39, 34, 0.2)"
       },
       fontFamily: {
         sans: [
@@ -37,4 +37,3 @@ export default {
   },
   plugins: []
 } satisfies Config;
-

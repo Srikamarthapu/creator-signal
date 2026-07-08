@@ -44,6 +44,12 @@ const campaignTypes = ["Try on reel", "Story set", "UGC only", "Affiliate"];
 const offerTypes = ["$900 flat", "Gifted plus commission", "Custom"];
 const tones: OutreachTone[] = ["Friendly", "Professional", "Direct"];
 const statusCycle: TimelineStatus[] = ["Pending", "Complete", "Blocked"];
+const avatarSizeClass = {
+  small: "avatar-small",
+  default: "avatar-default",
+  large: "avatar-large"
+} satisfies Record<"small" | "default" | "large", string>;
+const mosaicClassNames = ["mosaic-card mosaic-card-1", "mosaic-card mosaic-card-2", "mosaic-card mosaic-card-3", "mosaic-card mosaic-card-4"];
 
 const defaultSearch: SearchState = {
   product: "",
@@ -451,28 +457,36 @@ function TopNav({
   shortlistCount: number;
 }) {
   const navItems = [
-    { label: "Search", path: "/" },
-    { label: "Shortlist", path: "/shortlist" },
-    { label: "Campaigns", path: "/campaigns" }
+    { label: "Shortlist", path: "/shortlist", icon: Bookmark },
+    { label: "Campaigns", path: "/campaigns", icon: CalendarDays }
   ];
+  const searchActive = path === "/" || path === "/results" || path.startsWith("/creator/");
   return (
-    <header className="sticky top-0 z-30 border-b border-line bg-white/95 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+    <header className="sticky top-0 z-30 border-b border-line bg-mist/85 backdrop-blur-xl">
+      <div className="mx-auto grid h-20 max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 sm:px-6 lg:px-8">
+        <div className="justify-self-start">
+          <button className={`nav-button nav-button-quiet ${searchActive ? "nav-button-active" : ""}`} onClick={() => navigate("/")} aria-label="Start a creator search">
+            <Search className="h-4 w-4" />
+            <span>Search</span>
+          </button>
+        </div>
         <button className="brand" onClick={() => navigate("/")} aria-label="Go to CreatorSignal search">
           <span className="brand-mark">CS</span>
           <span>CreatorSignal</span>
         </button>
-        <nav className="flex items-center gap-1" aria-label="Primary navigation">
+        <nav className="flex items-center justify-end gap-2" aria-label="Primary navigation">
           {navItems.map((item) => {
             const isActive =
               item.path === "/" ? path === "/" || path === "/results" || path.startsWith("/creator/") : path.startsWith(item.path);
+            const Icon = item.icon;
             return (
               <button
                 key={item.path}
                 className={`nav-button ${isActive ? "nav-button-active" : ""}`}
                 onClick={() => navigate(item.path)}
               >
-                {item.label}
+                <Icon className="h-4 w-4" />
+                <span className="nav-label">{item.label}</span>
                 {item.label === "Shortlist" && shortlistCount ? <span className="nav-count">{shortlistCount}</span> : null}
               </button>
             );
@@ -496,22 +510,21 @@ function SearchScreen({
   submitSearch: (event: FormEvent) => void;
   integrationStatus: IntegrationStatus | null;
 }) {
+  const previewCreators = creators.slice(0, 4);
   return (
-    <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-      <div className="surface p-5 sm:p-8 lg:p-10">
-        <div className="max-w-3xl">
+    <section className="showcase-grid">
+      <div className="hero-panel">
+        <div className="hero-copy">
           <p className="eyebrow">Audience demand search</p>
-          <h1 className="mt-3 text-4xl font-semibold leading-tight sm:text-5xl">
-            Find creators whose audiences already want products like yours.
-          </h1>
-          <p className="mt-4 max-w-2xl text-lg leading-8 text-muted">
-            Search a product, review audience demand signals, shortlist creators, and draft outreach in minutes.
+          <h1>Find creators with audiences already leaning toward your product.</h1>
+          <p>
+            Rank creator fit, source public evidence, build a shortlist, and move into outreach from one calm workspace.
           </p>
         </div>
 
-        <form className="mt-8 flex flex-col gap-7" onSubmit={submitSearch}>
+        <form className="creator-command" onSubmit={submitSearch}>
           <label className="field-label" htmlFor="product-search">
-            What product are you promoting?
+            Product or category
           </label>
           <div className="search-row">
             <Search className="h-5 w-5 text-muted" aria-hidden="true" />
@@ -519,7 +532,7 @@ function SearchScreen({
               id="product-search"
               value={formState.product}
               onChange={(event) => setFormState({ ...formState, product: event.target.value })}
-              placeholder="Example: petite linen blazer"
+              placeholder="petite linen blazer"
               className="search-input"
               aria-describedby={validationError ? "search-error" : undefined}
             />
@@ -534,42 +547,56 @@ function SearchScreen({
             </p>
           ) : null}
 
-          <SegmentedControl label="Campaign goal" value={formState.goal} options={goals} onChange={(goal) => setFormState({ ...formState, goal })} />
-          <SegmentedControl label="Budget" value={formState.budget} options={budgets} onChange={(budget) => setFormState({ ...formState, budget })} />
-          <SegmentedControl
-            label="Platform"
-            value={formState.platform}
-            options={platforms}
-            onChange={(platform) => setFormState({ ...formState, platform: platform as Platform | "Any" })}
-          />
-          <SegmentedControl
-            label="Target audience"
-            value={formState.audience}
-            options={audiences}
-            onChange={(audience) => setFormState({ ...formState, audience })}
-          />
+          <div className="control-grid">
+            <SegmentedControl label="Goal" value={formState.goal} options={goals} onChange={(goal) => setFormState({ ...formState, goal })} />
+            <SegmentedControl label="Budget" value={formState.budget} options={budgets} onChange={(budget) => setFormState({ ...formState, budget })} />
+            <SegmentedControl
+              label="Platform"
+              value={formState.platform}
+              options={platforms}
+              onChange={(platform) => setFormState({ ...formState, platform: platform as Platform | "Any" })}
+            />
+            <SegmentedControl
+              label="Audience"
+              value={formState.audience}
+              options={audiences}
+              onChange={(audience) => setFormState({ ...formState, audience })}
+            />
+          </div>
         </form>
 
+        <div className="creator-mosaic" aria-label="Creator discovery preview">
+          {previewCreators.map((creator, index) => (
+            <div className={mosaicClassNames[index] || "mosaic-card"} key={creator.id}>
+              <Avatar creator={creator} />
+              <div>
+                <strong>{creator.name}</strong>
+                <span>{creator.niche}</span>
+              </div>
+              <small>{creator.audienceFit}</small>
+            </div>
+          ))}
+        </div>
+
+        <PrototypeDisclaimer className="mt-6" />
       </div>
 
-      <aside className="flex flex-col gap-4">
+      <aside className="preview-rail">
         <IntegrationPanel status={integrationStatus} />
         <div className="surface p-5">
-          <h2 className="section-title">Fast Check</h2>
-          <ol className="mt-4 space-y-3 text-sm text-muted">
+          <h2 className="section-title">Signal Board</h2>
+          <div className="mt-5 grid gap-3">
             {[
-              "Search budget decor.",
-              "Review real public creator sources.",
-              "Open the source result.",
-              "Draft outreach from the evidence.",
-              "Hand the design surface to a teammate."
-            ].map((step, index) => (
-              <li key={step} className="flex gap-3">
-                <span className="step-number">{index + 1}</span>
-                <span>{step}</span>
-              </li>
+              ["91", "Top audience fit"],
+              ["$700", "Median creator cost"],
+              ["4", "Campaign paths"]
+            ].map(([value, label]) => (
+              <div className="stat-row" key={label}>
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
             ))}
-          </ol>
+          </div>
         </div>
       </aside>
     </section>
@@ -619,7 +646,7 @@ function ResultsScreen({
 }) {
   const showRealResults = realInfluencers.length > 0;
   return (
-    <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+    <section className="results-grid">
       <div className="flex flex-col gap-4">
         <div className="surface p-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -627,7 +654,7 @@ function ResultsScreen({
               <p className="eyebrow">Ranked creator results</p>
               <h1 className="mt-2 text-3xl font-semibold">Search results for "{searchState.product || "your product"}"</h1>
               <p className="mt-2 text-sm text-muted">
-                Goal: {searchState.goal} | Budget: {searchState.budget} | Platform: {searchState.platform}
+                {searchState.goal} / {searchState.budget} / {searchState.platform}
               </p>
             </div>
             <form className="mini-search" onSubmit={submitSearch}>
@@ -643,7 +670,7 @@ function ResultsScreen({
             </form>
           </div>
           {validationError ? <p className="error-text mt-3">{validationError}</p> : null}
-          <div className="mt-5 flex flex-wrap items-center gap-3">
+          <div className="toolbar-strip mt-5">
             <FilterSelect
               icon={<SlidersHorizontal className="h-4 w-4" />}
               label="Sort"
@@ -744,10 +771,10 @@ function CreatorCard({
 }) {
   return (
     <article className="creator-card">
-      <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
-        <div className="flex min-w-0 gap-4">
+      <div className="creator-card-header">
+        <div className="creator-summary">
           <Avatar creator={creator} />
-          <div>
+          <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-semibold">{creator.name}</h2>
               <span className="prototype-pill">Local fallback</span>
@@ -757,7 +784,7 @@ function CreatorCard({
             </p>
           </div>
         </div>
-        <div className="score-box">
+        <div className="score-box score-box-compact">
           <span>{creator.prototypeMatchScore}</span>
           <small>Fallback match score</small>
         </div>
@@ -844,10 +871,10 @@ function RealInfluencerCard({
 }) {
   return (
     <article className="creator-card">
-      <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
-        <div className="flex min-w-0 gap-4">
+      <div className="creator-card-header">
+        <div className="creator-summary">
           <Avatar creator={{ name: influencer.displayName }} />
-          <div>
+          <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-semibold">{influencer.displayName}</h2>
               <span className="prototype-pill">Real public result</span>
@@ -858,7 +885,7 @@ function RealInfluencerCard({
             </p>
           </div>
         </div>
-        <div className="score-box">
+        <div className="score-box score-box-compact">
           <span>{influencer.matchScore}</span>
           <small>Source match score</small>
         </div>
@@ -1656,7 +1683,7 @@ function PrototypeDisclaimer({ className = "" }: { className?: string }) {
 }
 
 function Avatar({ creator, size = "default" }: { creator: Pick<Creator, "name">; size?: "small" | "default" | "large" }) {
-  return <span className={`avatar avatar-${size}`}>{initials(creator.name)}</span>;
+  return <span className={`avatar ${avatarSizeClass[size]}`}>{initials(creator.name)}</span>;
 }
 
 function Definition({ label, value }: { label: string; value: string }) {

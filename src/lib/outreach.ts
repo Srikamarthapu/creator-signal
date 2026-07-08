@@ -22,7 +22,7 @@ export function generateOutreachMessage({
     return [
       `Hi ${creator.name},`,
       "",
-      `I'm reaching out about a potential brand collaboration around ${product}. Your mock creator profile is focused on ${creator.niche.toLowerCase()}, and the prototype audience signals point to questions around ${topTheme} and "${signal}".`,
+      `I'm reaching out about a potential brand collaboration around ${product}. Your creator profile is focused on ${creator.niche.toLowerCase()}, and the audience signals point to questions around ${topTheme} and "${signal}".`,
       "",
       `We think the best fit could be a ${campaignType.toLowerCase()} with ${offer.toLowerCase()}, centered on ${creator.suggestedAngle.toLowerCase()}`,
       "",
@@ -37,7 +37,7 @@ export function generateOutreachMessage({
     return [
       `Hi ${creator.name},`,
       "",
-      `We are launching ${product} and think your ${creator.niche.toLowerCase()} audience is a strong fit based on mock demand signals like "${signal}".`,
+      `We are launching ${product} and think your ${creator.niche.toLowerCase()} audience is a strong fit based on demand signals like "${signal}".`,
       "",
       `The campaign idea is ${campaignType.toLowerCase()} with ${offer.toLowerCase()}, focused on ${creator.suggestedAngle.toLowerCase()}`,
       "",
@@ -61,4 +61,3 @@ export function generateOutreachMessage({
     "Team"
   ].join("\n");
 }
-

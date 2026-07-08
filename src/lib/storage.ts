@@ -21,8 +21,8 @@ export function writeLocal<T>(key: string, value: T): { ok: true } | { ok: false
 }
 
 export const storageKeys = {
+  lastSearch: "creator_signal_last_search",
   shortlist: "creator_signal_shortlist",
   campaigns: "creator_signal_campaigns",
   drafts: "creator_signal_drafts"
 } as const;
-

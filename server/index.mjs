@@ -577,8 +577,8 @@ function localProductBrief({ product, goal, platform, audience }, sources) {
 
   return {
     summary: snippets.length
-      ? `Local brief for ${product}: public search snippets were available, but creator recommendations still use fictional prototype data only.`
-      : `Local brief for ${product}: use the mock creator evidence to identify audience intent themes before outreach.`,
+      ? `Live brief for ${product}: public search snippets are available for demand and outreach context.`
+      : `Live brief for ${product}: public source snippets are limited, so verify creator-specific evidence in the real influencer results.`,
     demandSignals,
     searchAngles: [
       `${product} customer questions`,
@@ -588,10 +588,10 @@ function localProductBrief({ product, goal, platform, audience }, sources) {
     ].filter(Boolean),
     outreachCues: [
       `Reference the creator's niche and the clearest audience signal before mentioning ${product}.`,
-      platform ? `Keep the ask native to ${platform} rather than implying a real platform integration.` : "Keep the ask tied to the recommended campaign format.",
+      platform ? `Keep the ask native to ${platform} and reference the visible public source that matched.` : "Keep the ask tied to the recommended campaign format.",
       "Use copy, save draft, or local campaign planning only."
     ],
-    caution: "Prototype note: this brief may use live product web research, but creator profiles and creator metrics remain mock data."
+    caution: "Product research is public web context. Verify creator availability, rates, and analytics before committing budget."
   };
 }
 
@@ -638,7 +638,7 @@ function localCreatorResearchBrief({ product }, creator, sources, scrapedTexts) 
     audienceDemandTerms,
     agentSummary: sourceCount
       ? `Bright Data found public web context around ${creator.niche.toLowerCase()} and ${product || "this product category"}. Treat it as discovery context, not verified analytics for ${creator.name}.`
-      : `No strong public web enrichment was returned for ${creator.niche.toLowerCase()}; keep the mock audience signals as the main evidence.`,
+      : `No strong public web enrichment was returned for ${creator.niche.toLowerCase()}; use this only as fallback context.`,
     outreachAngle: `${creator.suggestedAngle || creator.whyMatch}`.slice(0, 180),
     confidence: sourceCount >= 4 ? "Medium" : "Low",
     caveat: "Live sources are public web discovery data. They are not verified creator platform analytics."
@@ -856,7 +856,7 @@ app.post("/api/product-intelligence", async (request, response) => {
     },
     brief: agentResult.brief,
     disclaimer:
-      "Product research may come from live web results. Creator records and creator metrics remain fictional prototype data."
+      "Product research may come from live public web results. Verify creator-specific analytics, rates, and availability before committing budget."
   });
 });
 

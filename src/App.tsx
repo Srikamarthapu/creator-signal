@@ -53,6 +53,15 @@ const defaultSearch: SearchState = {
   audience: "Millennial"
 };
 
+function readStoredSearch() {
+  const saved = readLocal<SearchState>(storageKeys.lastSearch, defaultSearch);
+  return {
+    ...defaultSearch,
+    ...saved,
+    product: saved.product?.trim() || defaultSearch.product
+  };
+}
+
 function pathFromWindow() {
   return window.location.pathname;
 }
@@ -98,8 +107,8 @@ function unsupportedQuery(product: string, results: RankedCreator[]) {
 
 export default function App() {
   const [path, setPath] = useState(pathFromWindow);
-  const [searchState, setSearchState] = useState<SearchState>(defaultSearch);
-  const [formState, setFormState] = useState<SearchState>(defaultSearch);
+  const [searchState, setSearchState] = useState<SearchState>(readStoredSearch);
+  const [formState, setFormState] = useState<SearchState>(readStoredSearch);
   const [validationError, setValidationError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
   const [sortMode, setSortMode] = useState<"match" | "cost" | "risk">("match");
@@ -244,10 +253,10 @@ export default function App() {
     const nextSearch = { ...formState, product: formState.product.trim() };
     setValidationError("");
     setSearchState(nextSearch);
+    persist(storageKeys.lastSearch, nextSearch);
     navigate("/results");
     void requestRealInfluencers(nextSearch);
     void requestIntelligence(nextSearch);
-    void requestCreatorEnrichment(nextSearch, rankCreators(nextSearch.product, nextSearch.platform));
   };
 
   const rankedCreators = useMemo(() => {
@@ -328,13 +337,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (path !== "/results" || !visibleResults.length) return;
-    const missingEnrichment = visibleResults.some((creator) => !creatorEnrichmentById[creator.id]);
-    if (missingEnrichment) {
-      void requestCreatorEnrichment(searchState, visibleResults);
-    }
+    if (path !== "/results" || !searchState.product.trim()) return;
+    if (realInfluencers.length || realInfluencersLoading || realInfluencerMeta || realInfluencersError) return;
+    void requestRealInfluencers(searchState);
+    void requestIntelligence(searchState);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, searchState.product, searchState.goal, searchState.platform, searchState.audience, visibleCreatorKey]);
+  }, [path, searchState.product, searchState.goal, searchState.platform, searchState.audience]);
 
   return (
     <div className="min-h-dvh bg-mist text-ink">
@@ -364,11 +372,6 @@ export default function App() {
             setFormState={setFormState}
             submitSearch={submitSearch}
             validationError={validationError}
-            results={visibleResults}
-            shortlistIds={shortlistIds}
-            toggleShortlist={toggleShortlist}
-            openOutreach={openOutreach}
-            navigate={navigate}
             sortMode={sortMode}
             setSortMode={setSortMode}
             riskFilter={riskFilter}
@@ -377,10 +380,6 @@ export default function App() {
             intelligenceLoading={intelligenceLoading}
             intelligenceError={intelligenceError}
             refreshIntelligence={() => requestIntelligence(searchState)}
-            creatorEnrichmentById={creatorEnrichmentById}
-            creatorEnrichmentLoading={creatorEnrichmentLoading}
-            creatorEnrichmentError={creatorEnrichmentError}
-            refreshCreatorEnrichment={() => requestCreatorEnrichment(searchState, visibleResults)}
             realInfluencers={realInfluencers}
             realInfluencersLoading={realInfluencersLoading}
             realInfluencersError={realInfluencersError}
@@ -551,20 +550,19 @@ function SearchScreen({
           />
         </form>
 
-        <PrototypeDisclaimer className="mt-8" />
       </div>
 
       <aside className="flex flex-col gap-4">
         <IntegrationPanel status={integrationStatus} />
         <div className="surface p-5">
-          <h2 className="section-title">Demo Path</h2>
+          <h2 className="section-title">Fast Check</h2>
           <ol className="mt-4 space-y-3 text-sm text-muted">
             {[
-              "Search petite linen blazer.",
-              "Review ranked creator evidence.",
-              "Open Maya R.",
-              "Generate outreach.",
-              "Create a local campaign timeline."
+              "Search budget decor.",
+              "Review real public creator sources.",
+              "Open the source result.",
+              "Draft outreach from the evidence.",
+              "Hand the design surface to a teammate."
             ].map((step, index) => (
               <li key={step} className="flex gap-3">
                 <span className="step-number">{index + 1}</span>
@@ -584,11 +582,6 @@ function ResultsScreen({
   setFormState,
   submitSearch,
   validationError,
-  results,
-  shortlistIds,
-  toggleShortlist,
-  openOutreach,
-  navigate,
   sortMode,
   setSortMode,
   riskFilter,
@@ -597,10 +590,6 @@ function ResultsScreen({
   intelligenceLoading,
   intelligenceError,
   refreshIntelligence,
-  creatorEnrichmentById,
-  creatorEnrichmentLoading,
-  creatorEnrichmentError,
-  refreshCreatorEnrichment,
   realInfluencers,
   realInfluencersLoading,
   realInfluencersError,
@@ -613,11 +602,6 @@ function ResultsScreen({
   setFormState: (next: SearchState) => void;
   submitSearch: (event: FormEvent) => void;
   validationError: string;
-  results: RankedCreator[];
-  shortlistIds: string[];
-  toggleShortlist: (creatorId: string) => void;
-  openOutreach: (creator: Creator) => void;
-  navigate: (path: string) => void;
   sortMode: "match" | "cost" | "risk";
   setSortMode: (mode: "match" | "cost" | "risk") => void;
   riskFilter: CampaignRisk | "Any";
@@ -626,10 +610,6 @@ function ResultsScreen({
   intelligenceLoading: boolean;
   intelligenceError: string;
   refreshIntelligence: () => void;
-  creatorEnrichmentById: Record<string, CreatorEnrichment>;
-  creatorEnrichmentLoading: boolean;
-  creatorEnrichmentError: string;
-  refreshCreatorEnrichment: () => void;
   realInfluencers: RealInfluencer[];
   realInfluencersLoading: boolean;
   realInfluencersError: string;
@@ -687,21 +667,11 @@ function ResultsScreen({
               ]}
               onChange={(value) => setRiskFilter(value as CampaignRisk | "Any")}
             />
-            <button className="secondary-button" onClick={refreshCreatorEnrichment}>
-              {creatorEnrichmentLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-              Refresh creator data
-            </button>
             <button className="secondary-button" onClick={refreshRealInfluencers}>
               {realInfluencersLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               Find real influencers
             </button>
           </div>
-          {creatorEnrichmentError ? (
-            <p className="mt-3 flex items-center gap-2 text-sm font-medium text-caution">
-              <AlertTriangle className="h-4 w-4" />
-              {creatorEnrichmentError}
-            </p>
-          ) : null}
           {realInfluencersError ? (
             <p className="mt-3 flex items-center gap-2 text-sm font-medium text-caution">
               <AlertTriangle className="h-4 w-4" />
@@ -727,7 +697,7 @@ function ResultsScreen({
           </div>
         ) : null}
 
-        {showRealResults ? (
+        {!realInfluencersLoading && showRealResults ? (
           <>
             <RealResultsBanner meta={realInfluencerMeta} />
             {realInfluencers.map((influencer) => (
@@ -738,30 +708,11 @@ function ResultsScreen({
               />
             ))}
           </>
-        ) : results.length ? (
-          <>
-            {!realInfluencersLoading ? (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-caution">
-                No real public influencer results are ready yet. Showing prototype fallback cards until Bright Data returns usable candidates.
-              </div>
-            ) : null}
-            {results.map((creator) => (
-            <CreatorCard
-              key={creator.id}
-              creator={creator}
-              isShortlisted={shortlistIds.includes(creator.id)}
-              toggleShortlist={toggleShortlist}
-              openOutreach={openOutreach}
-              navigate={navigate}
-              enrichment={creatorEnrichmentById[creator.id]}
-              enrichmentLoading={creatorEnrichmentLoading}
-            />
-            ))}
-          </>
-        ) : (
+        ) : !realInfluencersLoading && searchState.product.trim() ? (
+          <NoRealResultsState product={searchState.product} refreshRealInfluencers={refreshRealInfluencers} />
+        ) : !realInfluencersLoading ? (
           <EmptyState />
-        )}
-        <PrototypeDisclaimer />
+        ) : null}
       </div>
 
       <ProductIntelligencePanel
@@ -799,7 +750,7 @@ function CreatorCard({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-semibold">{creator.name}</h2>
-              <span className="prototype-pill">Mock data</span>
+              <span className="prototype-pill">Local fallback</span>
             </div>
             <p className="mt-1 text-sm text-muted">
               {creator.niche} | {creator.platforms.join(", ")} | {creator.followers} followers
@@ -808,7 +759,7 @@ function CreatorCard({
         </div>
         <div className="score-box">
           <span>{creator.prototypeMatchScore}</span>
-          <small>Prototype match score</small>
+          <small>Fallback match score</small>
         </div>
       </div>
 
@@ -858,6 +809,28 @@ function RealResultsBanner({ meta }: { meta: RealInfluencerResponse | null }) {
       <p className="mt-3 text-xs leading-5 text-signal-700">
         {meta?.disclaimer || "Displayed names and handles come from public search results. No private analytics or contact data is inferred."}
       </p>
+    </div>
+  );
+}
+
+function NoRealResultsState({
+  product,
+  refreshRealInfluencers
+}: {
+  product: string;
+  refreshRealInfluencers: () => void;
+}) {
+  return (
+    <div className="surface p-8 text-center">
+      <Search className="mx-auto h-8 w-8 text-muted" />
+      <h2 className="mt-4 text-xl font-semibold">No source-backed influencer results yet.</h2>
+      <p className="mx-auto mt-2 max-w-xl text-muted">
+        Bright Data did not return usable public creator candidates for "{product}" in this run.
+      </p>
+      <button className="secondary-button mx-auto mt-5" onClick={refreshRealInfluencers}>
+        <RefreshCcw className="h-4 w-4" />
+        Retry public search
+      </button>
     </div>
   );
 }
@@ -963,7 +936,7 @@ function CreatorProfileScreen({
           <ArrowLeft className="h-4 w-4" />
           Back to results
         </button>
-        <p className="mt-6 error-text">Creator not found in prototype data.</p>
+        <p className="mt-6 error-text">Creator not found in local fallback data.</p>
       </div>
     );
   }
@@ -1344,7 +1317,7 @@ function CampaignScreen({
         </button>
       </div>
       <div className="p-5 sm:p-8">
-        <p className="eyebrow">Mock workflow tracker</p>
+        <p className="eyebrow">Local workflow tracker</p>
         <h1 className="mt-2 text-3xl font-semibold">Campaign plan</h1>
         <div className="mt-5 grid gap-3 rounded-md border border-line bg-mist p-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Definition label="Creator" value={creator?.name || "Creator not found"} />
@@ -1376,7 +1349,7 @@ function CampaignScreen({
             </button>
           ) : null}
         </div>
-        <p className="mt-5 text-sm text-muted">This is a local mock timeline. No calendar booking or real scheduling is created.</p>
+        <p className="mt-5 text-sm text-muted">This is a local workflow timeline. No calendar booking or scheduling is created.</p>
       </div>
     </section>
   );
@@ -1536,7 +1509,7 @@ function ProductIntelligencePanel({
 
       {!intelligence && !loading && !error ? (
         <p className="mt-5 text-sm leading-6 text-muted">
-          Search a product to request a server-side Bright Data brief. Creator rankings remain local mock data.
+          Search a product to request live product context and source-backed creator discovery.
         </p>
       ) : null}
     </aside>
@@ -1576,7 +1549,7 @@ function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
         />
       </div>
       <p className="mt-4 text-xs leading-5 text-muted">
-        Integrations run on the local API only. Mock creators can be enriched with public web discovery context.
+        Integrations run on the local API only. Real influencer discovery uses public web sources returned by Bright Data.
       </p>
     </div>
   );
@@ -1677,7 +1650,7 @@ function MetricBadge({
 function PrototypeDisclaimer({ className = "" }: { className?: string }) {
   return (
     <p className={`prototype-disclaimer ${className}`}>
-      Prototype data. Not real influencer analytics.
+      Local fallback profile. Use real public results for source-backed discovery.
     </p>
   );
 }
@@ -1715,9 +1688,9 @@ function EmptyState() {
   return (
     <div className="surface p-8 text-center">
       <Search className="mx-auto h-8 w-8 text-muted" />
-      <h2 className="mt-4 text-xl font-semibold">No matching creators in the mock dataset.</h2>
+      <h2 className="mt-4 text-xl font-semibold">No real influencer search loaded yet.</h2>
       <p className="mx-auto mt-2 max-w-xl text-muted">
-        Try a broader product category like "workwear," "beauty," or "fitness."
+        Search a product category like "budget decor," "workwear," or "fitness" to pull public source-backed results.
       </p>
     </div>
   );

@@ -35,8 +35,8 @@ export function rankCreators(query: string, platform: Platform | "Any"): RankedC
           : 0;
       const score = Math.min(99, creator.audienceFit + matches.length * 8 + phraseBoost);
       const matchReasons = matches.length
-        ? matches.slice(0, 4).map((term) => `Contains "${term}" in mock audience evidence.`)
-        : ["Ranked from deterministic mock audience fit."];
+        ? matches.slice(0, 4).map((term) => `Contains "${term}" in local fallback audience evidence.`)
+        : ["Ranked from deterministic fallback audience fit."];
       return {
         ...creator,
         prototypeMatchScore: score,

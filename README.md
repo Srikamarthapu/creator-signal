@@ -1,6 +1,6 @@
 # CreatorSignal
 
-CreatorSignal is a responsive MVP prototype for finding fictional creators whose audiences show product demand signals.
+CreatorSignal is a responsive MVP for discovering public, source-backed creator matches from product searches.
 
 ## Run Locally
 
@@ -15,25 +15,24 @@ Open `http://127.0.0.1:5173/`.
 
 Copy `.env.example` to `.env.local` and fill server-side keys as needed.
 
-- `BRIGHT_DATA_API_KEY` powers the server-side product research endpoint.
-- `OPENAI_API_KEY` enables the OpenAI Agents SDK brief. Without it, the app returns a deterministic local brief.
+- `BRIGHT_DATA_API_KEY` powers server-side product research and real influencer discovery.
+- `OPENAI_API_KEY` enables OpenAI Agents SDK extraction and briefs. Without it, the app returns deterministic source extraction.
 
 No secrets are shipped to client JavaScript.
 
-## Prototype Rules
+## Data Rules
 
-- Creator records are fictional local mock data from `src/data/creators.ts`.
-- Creator metrics are prototype values, not real influencer analytics.
+- `/results` prioritizes real public web results returned by Bright Data and structured by OpenAI Agents when configured.
+- Local creator records in `src/data/creators.ts` are fallback placeholders only.
+- Source match scores are ranking aids, not verified social-platform analytics.
 - Outreach is copied or saved locally only. No email is sent.
 - Campaign plans are local workflow timelines. No calendar booking is created.
-- Bright Data and OpenAI Agents are used only for product research context, not creator analytics.
+- No private contact data, private analytics, or campaign performance is inferred.
 
 ## Demo Path
 
-1. Search `petite linen blazer`.
-2. View ranked results.
-3. Open Maya R.
-4. Review audience signals.
-5. Generate outreach and copy or save a local draft.
-6. Create a campaign timeline and toggle step status.
-
+1. Search `budget decor`.
+2. Review real public creator results.
+3. Open the source result.
+4. Draft outreach from source-backed evidence.
+5. Copy or save a local draft.

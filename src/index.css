@@ -479,17 +479,23 @@
     @apply sm:translate-y-6;
   }
 
-  .mosaic-card strong,
-  .mosaic-card span,
+  .mosaic-card .avatar,
+  .mosaic-copy,
+  .mosaic-copy strong,
+  .mosaic-copy span,
   .mosaic-card small {
     @apply relative z-10;
   }
 
-  .mosaic-card strong {
+  .mosaic-card .avatar {
+    @apply self-start;
+  }
+
+  .mosaic-copy strong {
     @apply mt-4 block text-sm font-semibold text-ink;
   }
 
-  .mosaic-card span {
+  .mosaic-copy span {
     @apply mt-1 block text-sm text-muted;
   }
 

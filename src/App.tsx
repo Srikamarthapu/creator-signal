@@ -569,7 +569,7 @@ function SearchScreen({
           {previewCreators.map((creator, index) => (
             <div className={mosaicClassNames[index] || "mosaic-card"} key={creator.id}>
               <Avatar creator={creator} />
-              <div>
+              <div className="mosaic-copy">
                 <strong>{creator.name}</strong>
                 <span>{creator.niche}</span>
               </div>

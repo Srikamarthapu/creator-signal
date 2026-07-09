@@ -173,7 +173,10 @@ function friendlyAIUnavailableNote(error, fallbackLabel = "rules-based source ex
     return `${configuredAIDisplayName()} credentials were rejected; returned ${fallbackLabel}.`;
   }
   if (/abort|timed out|timeout/i.test(message)) {
-    return `${configuredAIDisplayName()} timed out; returned ${fallbackLabel}.`;
+    return `${configuredAIDisplayName()} was slow for this interactive run; returned ${fallbackLabel}.`;
+  }
+  if (/response budget|interactive/i.test(message)) {
+    return `${configuredAIDisplayName()} exceeded the interactive response budget; returned ${fallbackLabel}.`;
   }
   if (/unavailable|failed|non-json|validation/i.test(message)) {
     return `${configuredAIDisplayName()} was unavailable; returned ${fallbackLabel}.`;
@@ -196,6 +199,19 @@ function googleModelCandidates() {
     .map((model) => model.trim())
     .filter(Boolean);
   return [...new Set([primary, ...fallbacks])];
+}
+
+function nvidiaModelCandidates() {
+  const primary = process.env.NVIDIA_MODEL || "z-ai/glm-5.2";
+  const fallbacks = String(process.env.NVIDIA_FALLBACK_MODELS || "")
+    .split(",")
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return [...new Set([primary, ...fallbacks])];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function extractJsonObject(text) {
@@ -284,59 +300,124 @@ async function runGoogleStructured(prompt, schemaHint) {
   throw new Error(`Google AI models unavailable: ${errors.join(" | ")}`);
 }
 
-async function runNvidiaStructured(prompt, schemaHint) {
+async function runNvidiaStructured(prompt, schemaHint, options = {}) {
   const apiKey = process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY;
   if (!apiKey) throw new Error("NVIDIA NIM API key is not configured.");
 
-  const model = process.env.NVIDIA_MODEL || "z-ai/glm-5.2";
   const baseUrl = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.NVIDIA_MODEL_TIMEOUT_MS || 45000));
-  let response;
-  try {
-    response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "system",
-            content: "Return compact valid JSON only. Do not wrap it in markdown. Do not include reasoning. Use only the provided context."
+  const connectTimeoutMs = Number(options.timeoutMs || process.env.NVIDIA_MODEL_TIMEOUT_MS || 90000);
+  const inactivityMs = Number(process.env.NVIDIA_STREAM_INACTIVITY_MS || 15000);
+  const attempts = Math.max(1, Math.min(3, Number(options.attempts || process.env.NVIDIA_MODEL_ATTEMPTS || 2)));
+  const maxTokens = Number(options.maxTokens || process.env.NVIDIA_MAX_TOKENS || 700);
+  const errors = [];
+
+  for (const model of nvidiaModelCandidates()) {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      // Initial timeout covers the connection + first token (time-to-first-token).
+      // Once streaming starts, we switch to an inactivity timeout that resets on each chunk.
+      let currentTimeout = setTimeout(() => controller.abort(), connectTimeoutMs + (attempt - 1) * 15000);
+      let response;
+      try {
+        response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            Accept: "text/event-stream"
           },
-          {
-            role: "user",
-            content: [schemaHint, prompt].join("\n\n")
+          body: JSON.stringify({
+            model,
+            messages: [
+              {
+                role: "system",
+                content: "Return compact valid JSON only. Do not wrap it in markdown. Do not include reasoning. Use only the provided context."
+              },
+              {
+                role: "user",
+                content: [schemaHint, prompt].join("\n\n")
+              }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0,
+            top_p: 1,
+            max_tokens: maxTokens,
+            stream: true
+          })
+        });
+      } catch (error) {
+        clearTimeout(currentTimeout);
+        errors.push(`${model} attempt ${attempt}: ${error instanceof Error && error.name === "AbortError" ? "timed out waiting for first response" : error instanceof Error ? error.message : "request failed"}`);
+        continue;
+      }
+
+      if (!response.ok) {
+        clearTimeout(currentTimeout);
+        const detail = await response.text().catch(() => "");
+        errors.push(`${model} attempt ${attempt}: ${response.status} ${detail.slice(0, 180)}`);
+        if (response.status === 429 || response.status >= 500) {
+          const retryAfter = Number(response.headers.get("retry-after") || 0);
+          await sleep(Math.min(5000, Math.max(750, retryAfter * 1000 || attempt * 1000)));
+          continue;
+        }
+        break;
+      }
+
+      // --- Stream SSE chunks with inactivity timeout ---
+      // As long as the model keeps sending tokens, the connection stays alive.
+      // Only times out if the model goes silent for NVIDIA_STREAM_INACTIVITY_MS (default 15s).
+      let accumulated = "";
+      try {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        // Switch from connect timeout to inactivity timeout now that we have a response
+        clearTimeout(currentTimeout);
+        currentTimeout = setTimeout(() => controller.abort(), inactivityMs);
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          // Reset inactivity timer on every chunk received
+          clearTimeout(currentTimeout);
+          currentTimeout = setTimeout(() => controller.abort(), inactivityMs);
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split("\n");
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data:")) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(payload);
+              const delta = parsed?.choices?.[0]?.delta?.content || "";
+              accumulated += delta;
+            } catch { /* skip malformed SSE lines */ }
           }
-        ],
-        temperature: 0.15,
-        top_p: 1,
-        max_tokens: Number(process.env.NVIDIA_MAX_TOKENS || 700),
-        stream: false
-      })
-    });
-  } catch (error) {
-    clearTimeout(timeout);
-    throw new Error(error instanceof Error && error.name === "AbortError" ? "NVIDIA NIM timed out" : error instanceof Error ? error.message : "NVIDIA NIM request failed");
-  } finally {
-    clearTimeout(timeout);
+        }
+      } catch (error) {
+        clearTimeout(currentTimeout);
+        if (error instanceof Error && error.name === "AbortError" && accumulated.length > 0) {
+          // Model went silent mid-stream — try to salvage what we got
+          const parsed = extractJsonObject(accumulated);
+          if (parsed) return { output: parsed, model };
+        }
+        errors.push(`${model} attempt ${attempt}: ${error instanceof Error && error.name === "AbortError" ? "stream stalled (inactivity timeout)" : error instanceof Error ? error.message : "stream failed"}`);
+        continue;
+      } finally {
+        clearTimeout(currentTimeout);
+      }
+
+      const parsed = extractJsonObject(accumulated);
+      if (parsed) return { output: parsed, model };
+      errors.push(`${model} attempt ${attempt}: non-JSON output`);
+    }
   }
 
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`NVIDIA NIM unavailable: ${response.status} ${detail.slice(0, 180)}`);
-  }
-
-  const data = await response.json();
-  const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || "";
-  const parsed = extractJsonObject(text);
-  if (parsed) return { output: parsed, model };
-  throw new Error("NVIDIA NIM returned non-JSON output");
+  throw new Error(`NVIDIA NIM unavailable: ${errors.join(" | ")}`);
 }
 
 function sanitizeSource(item, index) {
@@ -636,6 +717,31 @@ function sourceEvidence(source, product) {
   return evidence.slice(0, 4);
 }
 
+function compactSourcesForAI(sources, maxSources = 6) {
+  return sources.slice(0, maxSources).map((source) => ({
+    title: decodeHtml(source.title || "").slice(0, 130),
+    source: decodeHtml(source.source || "").slice(0, 80),
+    description: decodeHtml(source.description || "").slice(0, 220),
+    link: source.link || "",
+    rank: source.rank
+  }));
+}
+
+function compactCandidatesForAI(candidates, maxCandidates = 8) {
+  return candidates.slice(0, maxCandidates).map((candidate) => ({
+    displayName: candidate.displayName,
+    handle: candidate.handle,
+    platform: candidate.platform,
+    sourceUrl: candidate.sourceUrl,
+    sourceTitle: candidate.sourceTitle.slice(0, 130),
+    sourceDescription: candidate.sourceDescription.slice(0, 220),
+    niche: candidate.niche,
+    evidence: candidate.evidence,
+    confidence: candidate.confidence,
+    sourceType: candidate.sourceType
+  }));
+}
+
 function productIntentTerms(product) {
   const normalized = String(product || "").trim().toLowerCase();
   const words = normalized
@@ -780,11 +886,14 @@ function fallbackRealInfluencers(input, sources) {
 async function extractRealInfluencers(input, sources) {
   const fallback = fallbackRealInfluencers(input, sources);
   const provider = configuredAIProvider();
-  if (provider === "local" || !fallback.length) {
+  const aiMode = String(process.env.REAL_INFLUENCER_AI_MODE || "fast").toLowerCase();
+  if (provider === "local" || !fallback.length || aiMode !== "enhance") {
     return {
       candidates: fallback,
       usedOpenAIAgents: false,
-      caveat: "AI extraction unavailable; displayed rules-based Bright Data source extraction."
+      caveat: provider === "local"
+        ? "AI extraction unavailable; displayed rules-based Bright Data source extraction."
+        : "Fast mode: displayed Bright Data source extraction immediately. Set REAL_INFLUENCER_AI_MODE=enhance to let the AI provider rerank results."
     };
   }
 
@@ -794,8 +903,9 @@ async function extractRealInfluencers(input, sources) {
       goal: input.goal,
       platform: input.platform,
       audience: input.audience,
-      sources,
-      guardrail: "Never invent fields that are not visible in the supplied sources."
+      sourceCandidates: compactCandidatesForAI(fallback),
+      sources: compactSourcesForAI(sources),
+      guardrail: "Never invent fields that are not visible in the supplied sourceCandidates or sources."
     };
     let usedModel = configuredAIModel();
     const finalOutput =
@@ -806,9 +916,14 @@ async function extractRealInfluencers(input, sources) {
               JSON.stringify(payload),
               [
                 "Schema: {\"candidates\":[{\"displayName\":\"string\",\"handle\":\"optional string\",\"platform\":\"string\",\"profileUrl\":\"optional string\",\"sourceUrl\":\"string\",\"sourceTitle\":\"string\",\"sourceDescription\":\"string\",\"niche\":\"string\",\"matchReason\":\"string\",\"evidence\":[\"string\"],\"confidence\":\"Low|Medium|High\",\"sourceType\":\"profile|post|article|searchResult\"}],\"caveat\":\"string\"}",
-                "Extract real public creator or influencer candidates from Bright Data search results. Use only names, handles, platforms, URLs, and evidence visible in source titles, hostnames, URLs, and descriptions. Do not invent follower counts, emails, analytics, contact data, or profile URLs.",
+                "Clean and rank the supplied sourceCandidates from Bright Data. Use only names, handles, platforms, URLs, and evidence visible in source titles, hostnames, URLs, and descriptions. Do not invent follower counts, emails, analytics, contact data, or profile URLs.",
                 `Keep only candidates where the visible source text is related to this product intent: ${productIntentTerms(input.product).join(", ")}.`
-              ].join("\n")
+              ].join("\n"),
+              {
+                timeoutMs: Number(process.env.NVIDIA_REAL_INFLUENCER_TIMEOUT_MS || 60000),
+                attempts: Number(process.env.NVIDIA_MODEL_ATTEMPTS || 2),
+                maxTokens: 520
+              }
             );
             usedModel = structuredResult.model;
             return structuredResult.output;
@@ -820,8 +935,9 @@ async function extractRealInfluencers(input, sources) {
         goal: input.goal,
         platform: input.platform,
         audience: input.audience,
-        sources,
-        guardrail: "Never invent fields that are not visible in the supplied sources."
+        sourceCandidates: compactCandidatesForAI(fallback),
+        sources: compactSourcesForAI(sources),
+        guardrail: "Never invent fields that are not visible in the supplied sourceCandidates or sources."
       }),
             { maxTurns: 3 }
           )).finalOutput;
@@ -1060,7 +1176,7 @@ async function buildAgentBrief(input, brightDataResult) {
       goal: input.goal,
       platform: input.platform,
       audience: input.audience,
-      brightDataSources: brightDataResult.sources,
+      brightDataSources: compactSourcesForAI(brightDataResult.sources, 5),
       guardrail:
         "Only summarize product demand context. Do not infer real creator analytics or social scraping."
     };
@@ -1075,7 +1191,12 @@ async function buildAgentBrief(input, brightDataResult) {
                 "Schema: {\"summary\":\"string\",\"demandSignals\":[\"string\"],\"searchAngles\":[\"string\"],\"outreachCues\":[\"string\"],\"caution\":\"string\"}",
                 "Summarize public product research for a creator marketing workflow. Use only supplied Bright Data search snippets and product context. If evidence is thin, say so plainly.",
                 `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
-              ].join("\n")
+              ].join("\n"),
+              {
+                timeoutMs: Number(process.env.NVIDIA_PRODUCT_BRIEF_TIMEOUT_MS || 60000),
+                attempts: Number(process.env.NVIDIA_MODEL_ATTEMPTS || 2),
+                maxTokens: 460
+              }
             );
             usedModel = structuredResult.model;
             return structuredResult.output;
@@ -1087,7 +1208,7 @@ async function buildAgentBrief(input, brightDataResult) {
         goal: input.goal,
         platform: input.platform,
         audience: input.audience,
-        brightDataSources: brightDataResult.sources,
+        brightDataSources: compactSourcesForAI(brightDataResult.sources, 5),
         guardrail:
           "Only summarize product demand context. Do not infer real creator analytics or social scraping."
       }),
@@ -1156,7 +1277,12 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
               [
                 "Schema: {\"audienceDemandTerms\":[\"string\"],\"agentSummary\":\"string\",\"outreachAngle\":\"string\",\"confidence\":\"Low|Medium|High\",\"caveat\":\"string\"}",
                 "Summarize how public web context supports this creator niche fit and outreach angle. Do not invent metrics, emails, verification, profile claims, or analytics."
-              ].join("\n")
+              ].join("\n"),
+              {
+                timeoutMs: Number(process.env.NVIDIA_CREATOR_ENRICHMENT_TIMEOUT_MS || 60000),
+                attempts: Number(process.env.NVIDIA_MODEL_ATTEMPTS || 2),
+                maxTokens: 460
+              }
             );
             usedModel = structuredResult.model;
             return structuredResult.output;

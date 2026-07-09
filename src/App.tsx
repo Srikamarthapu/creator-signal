@@ -29,7 +29,8 @@ const budgets = ["Under $1k", "$1k to $5k", "$5k to $20k", "$20k plus"];
 const platforms: Array<Platform | "Any"> = ["Any", "TikTok", "Instagram", "YouTube"];
 const audiences = ["Gen Z", "Millennial", "Premium", "Budget"];
 type RealSortMode = "match" | "cost" | "risk" | "evidence";
-type RealEvidenceFilter = "Any" | RealInfluencer["sourceType"];
+type RealIntentFilter = "Any" | "Shopping intent" | "Review/demo" | "Creator/UGC" | "Direct product fit";
+type RealQualityFilter = "Any" | "High confidence" | "Social source" | "Profile source" | "Article/list";
 type RealCostFilter = "Any" | "Lower" | "Medium" | "Higher";
 const evidenceLabels = {
   profile: "Creator profile",
@@ -124,6 +125,59 @@ function realInfluencerCostTier(influencer: RealInfluencer) {
   return "Lower";
 }
 
+function realInfluencerText(influencer: RealInfluencer) {
+  return [
+    influencer.displayName,
+    influencer.handle,
+    influencer.platform,
+    influencer.sourceUrl,
+    influencer.sourceTitle,
+    influencer.sourceDescription,
+    influencer.niche,
+    influencer.matchReason,
+    ...influencer.evidence
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function productKeywords(product: string) {
+  return product
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3 && !["the", "and", "for", "with"].includes(word));
+}
+
+function hasDirectProductFit(influencer: RealInfluencer, product: string) {
+  const text = realInfluencerText(influencer);
+  const keywords = productKeywords(product);
+  return keywords.length ? keywords.some((keyword) => text.includes(keyword)) : true;
+}
+
+function realInfluencerBuyerSignals(influencer: RealInfluencer, product: string) {
+  const text = realInfluencerText(influencer);
+  const signals = [];
+  if (/\b(shop|shopping|link in bio|comment shop|ltk|affiliate|amazon|storefront|buy|gift guide)\b/i.test(text)) signals.push("Shopping intent");
+  if (/\b(review|setup|haul|unboxing|demo|try on|routine|comparison|before and after)\b/i.test(text)) signals.push("Review/demo");
+  if (/\b(creator|influencer|ugc|content creator|collab|sponsored)\b/i.test(text)) signals.push("Creator/UGC");
+  if (hasDirectProductFit(influencer, product)) signals.push("Direct product fit");
+  return [...new Set(signals)];
+}
+
+function realInfluencerMatchesIntent(influencer: RealInfluencer, product: string, filter: RealIntentFilter) {
+  return filter === "Any" || realInfluencerBuyerSignals(influencer, product).includes(filter);
+}
+
+function realInfluencerMatchesQuality(influencer: RealInfluencer, filter: RealQualityFilter) {
+  if (filter === "Any") return true;
+  if (filter === "High confidence") return influencer.confidence === "High";
+  if (filter === "Social source") return influencer.sourceType === "profile" || influencer.sourceType === "post";
+  if (filter === "Profile source") return influencer.sourceType === "profile";
+  return influencer.sourceType === "article";
+}
+
 export default function App() {
   const [path, setPath] = useState(pathFromWindow);
   const [searchState, setSearchState] = useState<SearchState>(readStoredSearch);
@@ -133,7 +187,8 @@ export default function App() {
   const [sortMode, setSortMode] = useState<RealSortMode>("match");
   const [riskFilter, setRiskFilter] = useState<CampaignRisk | "Any">("Any");
   const [platformFilter, setPlatformFilter] = useState("Any");
-  const [evidenceFilter, setEvidenceFilter] = useState<RealEvidenceFilter>("Any");
+  const [intentFilter, setIntentFilter] = useState<RealIntentFilter>("Any");
+  const [qualityFilter, setQualityFilter] = useState<RealQualityFilter>("Any");
   const [costFilter, setCostFilter] = useState<RealCostFilter>("Any");
   const [integrationStatus, setIntegrationStatus] = useState<IntegrationStatus | null>(null);
   const [intelligence, setIntelligence] = useState<ProductIntelligence | null>(null);
@@ -229,6 +284,12 @@ export default function App() {
     }
     const nextSearch = { ...formState, product: formState.product.trim() };
     setValidationError("");
+    setSortMode("match");
+    setRiskFilter("Any");
+    setPlatformFilter("Any");
+    setIntentFilter("Any");
+    setQualityFilter("Any");
+    setCostFilter("Any");
     setSearchState(nextSearch);
     persist(storageKeys.lastSearch, nextSearch);
     navigate("/results");
@@ -280,8 +341,10 @@ export default function App() {
             setRiskFilter={setRiskFilter}
             platformFilter={platformFilter}
             setPlatformFilter={setPlatformFilter}
-            evidenceFilter={evidenceFilter}
-            setEvidenceFilter={setEvidenceFilter}
+            intentFilter={intentFilter}
+            setIntentFilter={setIntentFilter}
+            qualityFilter={qualityFilter}
+            setQualityFilter={setQualityFilter}
             costFilter={costFilter}
             setCostFilter={setCostFilter}
             intelligence={intelligence}
@@ -459,8 +522,10 @@ function ResultsScreen({
   setRiskFilter,
   platformFilter,
   setPlatformFilter,
-  evidenceFilter,
-  setEvidenceFilter,
+  intentFilter,
+  setIntentFilter,
+  qualityFilter,
+  setQualityFilter,
   costFilter,
   setCostFilter,
   intelligence,
@@ -485,8 +550,10 @@ function ResultsScreen({
   setRiskFilter: (risk: CampaignRisk | "Any") => void;
   platformFilter: string;
   setPlatformFilter: (platform: string) => void;
-  evidenceFilter: RealEvidenceFilter;
-  setEvidenceFilter: (evidence: RealEvidenceFilter) => void;
+  intentFilter: RealIntentFilter;
+  setIntentFilter: (intent: RealIntentFilter) => void;
+  qualityFilter: RealQualityFilter;
+  setQualityFilter: (quality: RealQualityFilter) => void;
   costFilter: RealCostFilter;
   setCostFilter: (cost: RealCostFilter) => void;
   intelligence: ProductIntelligence | null;
@@ -500,24 +567,53 @@ function ResultsScreen({
   refreshRealInfluencers: () => void;
   openRealOutreach: (influencer: RealInfluencer) => void;
 }) {
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const showRealResults = realInfluencers.length > 0;
+  const product = searchState.product || formState.product || "";
+  const countMatching = (predicate: (influencer: RealInfluencer) => boolean) => realInfluencers.filter(predicate).length;
   const platformOptions = useMemo(() => {
     const values = [...new Set(realInfluencers.map((influencer) => influencer.platform).filter(Boolean))].sort();
     return [
-      { label: "All platforms", value: "Any" },
-      ...values.map((platform) => ({ label: platform, value: platform }))
+      { label: "All", value: "Any", count: realInfluencers.length },
+      ...values.map((platform) => ({
+        label: platform,
+        value: platform,
+        count: realInfluencers.filter((influencer) => influencer.platform === platform).length
+      }))
     ];
   }, [realInfluencers]);
-  const evidenceOptions = useMemo(() => {
-    const values = [...new Set(realInfluencers.map((influencer) => influencer.sourceType))].sort((a, b) => sourceTypeOrder(a) - sourceTypeOrder(b));
+  const intentOptions = useMemo<Array<{ label: string; value: RealIntentFilter; count: number }>>(() => {
     return [
-      { label: "All evidence", value: "Any" },
-      ...values.map((sourceType) => ({ label: realInfluencerEvidenceLabel(sourceType), value: sourceType }))
+      { label: "All", value: "Any", count: realInfluencers.length },
+      { label: "Shopping intent", value: "Shopping intent", count: countMatching((influencer) => realInfluencerMatchesIntent(influencer, product, "Shopping intent")) },
+      { label: "Review/demo", value: "Review/demo", count: countMatching((influencer) => realInfluencerMatchesIntent(influencer, product, "Review/demo")) },
+      { label: "Creator/UGC", value: "Creator/UGC", count: countMatching((influencer) => realInfluencerMatchesIntent(influencer, product, "Creator/UGC")) },
+      { label: "Product fit", value: "Direct product fit", count: countMatching((influencer) => realInfluencerMatchesIntent(influencer, product, "Direct product fit")) }
     ];
-  }, [realInfluencers]);
+  }, [product, realInfluencers]);
+  const qualityOptions = useMemo<Array<{ label: string; value: RealQualityFilter; count: number }>>(() => [
+    { label: "All", value: "Any", count: realInfluencers.length },
+    { label: "High confidence", value: "High confidence", count: countMatching((influencer) => realInfluencerMatchesQuality(influencer, "High confidence")) },
+    { label: "Social source", value: "Social source", count: countMatching((influencer) => realInfluencerMatchesQuality(influencer, "Social source")) },
+    { label: "Profile", value: "Profile source", count: countMatching((influencer) => realInfluencerMatchesQuality(influencer, "Profile source")) },
+    { label: "Article/list", value: "Article/list", count: countMatching((influencer) => realInfluencerMatchesQuality(influencer, "Article/list")) }
+  ], [realInfluencers]);
+  const costOptions = useMemo<Array<{ label: string; value: RealCostFilter; count: number }>>(() => [
+    { label: "All", value: "Any", count: realInfluencers.length },
+    { label: "Lower", value: "Lower", count: countMatching((influencer) => realInfluencerCostTier(influencer) === "Lower") },
+    { label: "Medium", value: "Medium", count: countMatching((influencer) => realInfluencerCostTier(influencer) === "Medium") },
+    { label: "Higher", value: "Higher", count: countMatching((influencer) => realInfluencerCostTier(influencer) === "Higher") }
+  ], [realInfluencers]);
+  const riskOptions = useMemo<Array<{ label: string; value: CampaignRisk | "Any"; count: number }>>(() => [
+    { label: "All", value: "Any", count: realInfluencers.length },
+    { label: "Low", value: "Low", count: countMatching((influencer) => realInfluencerRisk(influencer) === "Low") },
+    { label: "Medium", value: "Medium", count: countMatching((influencer) => realInfluencerRisk(influencer) === "Medium") },
+    { label: "High", value: "High", count: countMatching((influencer) => realInfluencerRisk(influencer) === "High") }
+  ], [realInfluencers]);
   const filteredRealInfluencers = realInfluencers
     .filter((influencer) => platformFilter === "Any" || influencer.platform === platformFilter)
-    .filter((influencer) => evidenceFilter === "Any" || influencer.sourceType === evidenceFilter)
+    .filter((influencer) => realInfluencerMatchesIntent(influencer, product, intentFilter))
+    .filter((influencer) => realInfluencerMatchesQuality(influencer, qualityFilter))
     .filter((influencer) => costFilter === "Any" || realInfluencerCostTier(influencer) === costFilter)
     .filter((influencer) => riskFilter === "Any" || realInfluencerRisk(influencer) === riskFilter)
     .sort((a, b) => {
@@ -528,7 +624,24 @@ function ResultsScreen({
       }
       return b.matchScore - a.matchScore;
     });
-  const hasActiveRealFilters = platformFilter !== "Any" || evidenceFilter !== "Any" || costFilter !== "Any" || riskFilter !== "Any" || sortMode !== "match";
+  const activeFilterLabels = [
+    sortMode !== "match" ? `Sorted by ${sortMode === "cost" ? "lowest cost" : sortMode === "risk" ? "lowest risk" : "strongest evidence"}` : "",
+    platformFilter !== "Any" ? `Platform: ${platformFilter}` : "",
+    intentFilter !== "Any" ? `Intent: ${intentFilter}` : "",
+    qualityFilter !== "Any" ? `Quality: ${qualityFilter}` : "",
+    costFilter !== "Any" ? `Cost: ${costFilter}` : "",
+    riskFilter !== "Any" ? `Risk: ${riskFilter}` : ""
+  ].filter(Boolean);
+  const hasActiveRealFilters = activeFilterLabels.length > 0;
+  const activeMenuFilterCount = [platformFilter, intentFilter, qualityFilter, costFilter, riskFilter].filter((value) => value !== "Any").length;
+  const resetRealFilters = () => {
+    setSortMode("match");
+    setRiskFilter("Any");
+    setPlatformFilter("Any");
+    setIntentFilter("Any");
+    setQualityFilter("Any");
+    setCostFilter("Any");
+  };
   return (
     <section className="results-grid">
       <div className="flex flex-col gap-4">
@@ -567,63 +680,105 @@ function ResultsScreen({
               ]}
               onChange={(value) => setSortMode(value as RealSortMode)}
             />
-            <FilterSelect
-              icon={<ExternalLink className="h-4 w-4" />}
-              label="Platform"
-              value={platformFilter}
-              options={platformOptions}
-              onChange={setPlatformFilter}
-            />
-            <FilterSelect
-              icon={<BarChart3 className="h-4 w-4" />}
-              label="Evidence"
-              value={evidenceFilter}
-              options={evidenceOptions}
-              onChange={(value) => setEvidenceFilter(value as RealEvidenceFilter)}
-            />
-            <FilterSelect
-              icon={<CircleDollarSign className="h-4 w-4" />}
-              label="Cost band"
-              value={costFilter}
-              options={[
-                { label: "Any cost", value: "Any" },
-                { label: "Lower", value: "Lower" },
-                { label: "Medium", value: "Medium" },
-                { label: "Higher", value: "Higher" }
-              ]}
-              onChange={(value) => setCostFilter(value as RealCostFilter)}
-            />
-            <FilterSelect
-              icon={<ShieldCheck className="h-4 w-4" />}
-              label="Campaign risk"
-              value={riskFilter}
-              options={[
-                { label: "Any risk", value: "Any" },
-                { label: "Low", value: "Low" },
-                { label: "Medium", value: "Medium" },
-                { label: "High", value: "High" }
-              ]}
-              onChange={(value) => setRiskFilter(value as CampaignRisk | "Any")}
-            />
-            <button className="secondary-button" onClick={refreshRealInfluencers}>
+            <button className="secondary-button" type="button" onClick={refreshRealInfluencers} disabled={realInfluencersLoading}>
               {realInfluencersLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               Find real influencers
             </button>
+            {showRealResults ? (
+              <button
+                className={`secondary-button filter-toggle-button ${filtersOpen ? "filter-toggle-button-active" : ""}`}
+                type="button"
+                aria-expanded={filtersOpen}
+                aria-controls="creator-filter-menu"
+                onClick={() => setFiltersOpen((open) => !open)}
+              >
+                <SlidersHorizontal className="h-4 w-4" />
+                {filtersOpen ? "Hide filters" : "Filters"}
+                {activeMenuFilterCount ? <span className="nav-count">{activeMenuFilterCount}</span> : null}
+              </button>
+            ) : null}
             {hasActiveRealFilters ? (
               <button
                 className="ghost-button"
-                onClick={() => {
-                  setSortMode("match");
-                  setRiskFilter("Any");
-                  setPlatformFilter("Any");
-                  setEvidenceFilter("Any");
-                  setCostFilter("Any");
-                }}
+                type="button"
+                onClick={resetRealFilters}
               >
                 Reset filters
               </button>
             ) : null}
           </div>
+          {showRealResults && (filtersOpen || hasActiveRealFilters) ? (
+            <div className="filter-panel mt-4">
+              <div className="filter-panel-header">
+                <div>
+                  <p className="eyebrow">Filter menu</p>
+                  <h2>{filtersOpen ? "Refine the creator list" : "Applied filters"}</h2>
+                </div>
+                <div className="filter-impact" aria-live="polite">
+                  <span>
+                    <strong>{filteredRealInfluencers.length}</strong>
+                    visible
+                  </span>
+                  <span>
+                    <strong>{Math.max(0, realInfluencers.length - filteredRealInfluencers.length)}</strong>
+                    hidden
+                  </span>
+                </div>
+              </div>
+              {filtersOpen ? (
+                <div id="creator-filter-menu" className="filter-menu-grid">
+                  <FilterSelect
+                  icon={<ExternalLink className="h-4 w-4" />}
+                  label="Platform"
+                  value={platformFilter}
+                  options={platformOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
+                  onChange={setPlatformFilter}
+                />
+                  <FilterSelect
+                  icon={<BarChart3 className="h-4 w-4" />}
+                  label="Buyer intent"
+                  value={intentFilter}
+                  options={intentOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
+                  onChange={(value) => setIntentFilter(value as RealIntentFilter)}
+                />
+                  <FilterSelect
+                  icon={<ShieldCheck className="h-4 w-4" />}
+                  label="Source quality"
+                  value={qualityFilter}
+                  options={qualityOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
+                  onChange={(value) => setQualityFilter(value as RealQualityFilter)}
+                />
+                  <FilterSelect
+                  icon={<CircleDollarSign className="h-4 w-4" />}
+                  label="Estimated cost"
+                  value={costFilter}
+                  options={costOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
+                  onChange={(value) => setCostFilter(value as RealCostFilter)}
+                />
+                  <FilterSelect
+                  icon={<AlertTriangle className="h-4 w-4" />}
+                  label="Campaign risk"
+                  value={riskFilter}
+                  options={riskOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
+                  onChange={(value) => setRiskFilter(value as CampaignRisk | "Any")}
+                />
+                </div>
+              ) : null}
+              {activeFilterLabels.length ? (
+                <div className="active-filter-row" aria-label="Active filters">
+                  {activeFilterLabels.map((label) => (
+                    <span className="active-filter-chip" key={label}>
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-muted">
+                  Use filters to narrow by channel, buying signal, source quality, expected cost, and campaign risk.
+                </p>
+              )}
+            </div>
+          ) : null}
           {showRealResults ? (
             <p className="mt-3 text-sm text-muted">
               Showing {filteredRealInfluencers.length} of {realInfluencers.length} source-backed creators.
@@ -662,11 +817,12 @@ function ResultsScreen({
                 <RealInfluencerCard
                   key={`${influencer.sourceUrl}-${influencer.displayName}`}
                   influencer={influencer}
+                  product={product}
                   openRealOutreach={openRealOutreach}
                 />
               ))
             ) : (
-              <FilteredRealResultsState />
+              <FilteredRealResultsState resetRealFilters={resetRealFilters} />
             )}
           </>
         ) : !realInfluencersLoading && searchState.product.trim() ? (
@@ -696,8 +852,9 @@ function RealResultsBanner({ meta }: { meta: RealInfluencerResponse | null }) {
             Bright Data discovered {meta?.brightData.sourceCount ?? 0} public source results. The configured AI provider structured source-backed candidates.
           </p>
         </div>
-        <span className="live-pill live-pill-agent">{meta?.openaiAgents.used ? "AI extracted" : "Deterministic extraction"}</span>
+        <span className="live-pill live-pill-agent">{meta?.openaiAgents.used ? "AI structured" : "Rules-based extraction"}</span>
       </div>
+      {meta?.caveat ? <p className="mt-3 text-xs leading-5 text-signal-700">{meta.caveat}</p> : null}
       <p className="mt-3 text-xs leading-5 text-signal-700">
         {meta?.disclaimer || "Displayed names and handles come from public search results. No private analytics or contact data is inferred."}
       </p>
@@ -727,14 +884,17 @@ function NoRealResultsState({
   );
 }
 
-function FilteredRealResultsState() {
+function FilteredRealResultsState({ resetRealFilters }: { resetRealFilters: () => void }) {
   return (
     <div className="surface p-8 text-center">
       <SlidersHorizontal className="mx-auto h-8 w-8 text-muted" />
       <h2 className="mt-4 text-xl font-semibold">No creator results match these filters.</h2>
       <p className="mx-auto mt-2 max-w-xl text-muted">
-        Adjust platform, evidence, cost band, or campaign risk to review the remaining source-backed results.
+        Adjust platform, buyer intent, source quality, cost, or campaign risk to review the remaining source-backed results.
       </p>
+      <button className="secondary-button mx-auto mt-5" type="button" onClick={resetRealFilters}>
+        Reset filters
+      </button>
     </div>
   );
 }
@@ -757,11 +917,14 @@ function LocalWorkflowRemoved({ navigate }: { navigate: (path: string) => void }
 
 function RealInfluencerCard({
   influencer,
+  product,
   openRealOutreach
 }: {
   influencer: RealInfluencer;
+  product: string;
   openRealOutreach: (influencer: RealInfluencer) => void;
 }) {
+  const buyerSignals = realInfluencerBuyerSignals(influencer, product);
   return (
     <article className="creator-card">
       <div className="creator-card-header">
@@ -800,6 +963,18 @@ function RealInfluencerCard({
         <p className="eyebrow">Source-backed evidence</p>
         <p className="mt-2 text-sm font-semibold">{influencer.sourceTitle}</p>
         <p className="mt-2 text-sm leading-6 text-muted">{influencer.sourceDescription}</p>
+        {buyerSignals.length ? (
+          <div className="mt-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-signal-700">Buyer signals used by filters</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {buyerSignals.map((signal) => (
+                <span className="signal-chip" key={signal}>
+                  {signal}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div className="mt-3 flex flex-wrap gap-2">
           {influencer.evidence.map((item) => (
             <span className="live-term" key={item}>

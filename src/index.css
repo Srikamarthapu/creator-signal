@@ -21,8 +21,8 @@
     min-width: 320px;
     min-height: 100dvh;
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(243, 241, 237, 0) 340px),
-      #f3f1ed;
+      linear-gradient(140deg, rgba(255, 255, 255, 0.78), rgba(238, 238, 234, 0.34) 38%, rgba(221, 221, 216, 0.2) 68%),
+      linear-gradient(180deg, #f7f7f4, #e9e9e4);
   }
 
   button,
@@ -54,7 +54,7 @@
 
 @layer components {
   .surface {
-    @apply rounded-lg border border-line bg-white/80 shadow-panel backdrop-blur;
+    @apply rounded-lg border border-white/70 bg-white/80 shadow-panel backdrop-blur-xl;
     animation: content-enter 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
 
@@ -167,6 +167,51 @@
     @apply min-w-0 border-0 bg-transparent font-semibold text-ink outline-none;
   }
 
+  .filter-toggle-button-active {
+    @apply border-signal-900 bg-signal-900 text-white hover:bg-signal-900 hover:text-white;
+  }
+
+  .filter-toggle-button-active .nav-count {
+    @apply bg-white text-signal-900;
+  }
+
+  .filter-panel {
+    @apply rounded-lg border border-white/70 bg-white/80 p-4 shadow-panel backdrop-blur-xl;
+  }
+
+  .filter-panel-header {
+    @apply flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between;
+  }
+
+  .filter-panel-header h2 {
+    @apply mt-1 text-lg font-semibold text-ink;
+  }
+
+  .filter-impact {
+    @apply grid grid-cols-2 gap-2 rounded-lg border border-line bg-mist/80 p-2 text-center text-xs font-semibold uppercase tracking-[0.04em] text-muted;
+    min-width: 12rem;
+  }
+
+  .filter-impact span {
+    @apply rounded-md bg-white px-3 py-2;
+  }
+
+  .filter-impact strong {
+    @apply mr-1 text-base text-ink;
+  }
+
+  .filter-menu-grid {
+    @apply mt-4 grid gap-3 border-t border-line pt-4 sm:grid-cols-2 xl:grid-cols-3;
+  }
+
+  .active-filter-row {
+    @apply mt-4 flex flex-wrap gap-2 border-t border-line pt-3;
+  }
+
+  .active-filter-chip {
+    @apply rounded-full bg-signal-50 px-3 py-1.5 text-xs font-semibold text-signal-900;
+  }
+
   .prototype-disclaimer {
     @apply rounded-full border border-line bg-white/70 px-3 py-2 text-xs font-medium text-muted;
   }
@@ -176,7 +221,7 @@
   }
 
   .creator-card {
-    @apply rounded-lg border border-line bg-white/90 p-5 shadow-panel transition-all duration-300 hover:-translate-y-1 hover:border-signal-100 hover:shadow-popover;
+    @apply rounded-lg border border-white/70 bg-white/90 p-5 shadow-panel backdrop-blur transition-all duration-300 hover:-translate-y-1 hover:border-signal-100 hover:shadow-popover;
     animation: content-enter 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
 
@@ -287,6 +332,10 @@
   }
 
   .live-term {
+    @apply rounded-full border border-signal-100 bg-white px-2.5 py-1 text-xs font-semibold text-signal-900;
+  }
+
+  .signal-chip {
     @apply rounded-full border border-signal-100 bg-white px-2.5 py-1 text-xs font-semibold text-signal-900;
   }
 
@@ -425,7 +474,7 @@
   }
 
   .hero-panel {
-    @apply overflow-hidden rounded-lg border border-line bg-white/80 p-5 shadow-panel backdrop-blur sm:p-7 lg:p-8;
+    @apply overflow-hidden rounded-lg border border-white/70 bg-white/80 p-5 shadow-panel backdrop-blur-xl sm:p-7 lg:p-8;
     animation: content-enter 560ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
 
@@ -561,6 +610,10 @@
     min-height: 48px;
     width: 100%;
     justify-content: space-between;
+  }
+
+  .filter-impact {
+    width: 100%;
   }
 
   .filter-select select {

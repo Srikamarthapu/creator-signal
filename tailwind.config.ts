@@ -5,24 +5,24 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#1f1f1d",
-        muted: "#77746d",
-        line: "#dedbd4",
-        mist: "#f3f1ed",
+        ink: "#171717",
+        muted: "#6f6f6b",
+        line: "#d8d8d3",
+        mist: "#eeeeea",
         signal: {
-          50: "#f6f5f2",
-          100: "#e8e4dc",
-          500: "#6f655a",
-          600: "#4b4640",
-          700: "#302f2c",
-          900: "#20201e"
+          50: "#f7f7f4",
+          100: "#e3e3de",
+          500: "#777771",
+          600: "#50504b",
+          700: "#2e2e2b",
+          900: "#161615"
         },
         caution: "#9a6700",
         danger: "#b42318"
       },
       boxShadow: {
-        panel: "0 18px 50px rgba(42, 39, 34, 0.08)",
-        popover: "0 24px 70px rgba(42, 39, 34, 0.2)"
+        panel: "0 18px 55px rgba(22, 22, 21, 0.09)",
+        popover: "0 24px 70px rgba(22, 22, 21, 0.22)"
       },
       fontFamily: {
         sans: [

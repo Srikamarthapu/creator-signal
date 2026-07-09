@@ -131,12 +131,106 @@ function hasOpenAIConfig() {
   return Boolean(process.env.OPENAI_API_KEY);
 }
 
+function hasGoogleAIConfig() {
+  return Boolean(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY);
+}
+
+function configuredAIProvider() {
+  const preferred = String(process.env.AI_PROVIDER || "").toLowerCase();
+  if (preferred === "google" && hasGoogleAIConfig()) return "google";
+  if (preferred === "openai" && hasOpenAIConfig()) return "openai";
+  if (hasOpenAIConfig()) return "openai";
+  if (hasGoogleAIConfig()) return "google";
+  return "local";
+}
+
+function configuredAIModel() {
+  if (configuredAIProvider() === "google") return process.env.GOOGLE_MODEL || "gemini-2.5-flash";
+  if (configuredAIProvider() === "openai") return process.env.OPENAI_MODEL || "gpt-5.5";
+  return "deterministic-local";
+}
+
+function configuredAIDisplayName() {
+  if (configuredAIProvider() === "google") return "Google Gemini";
+  if (configuredAIProvider() === "openai") return "OpenAI Agents SDK";
+  return "Deterministic local extraction";
+}
+
 function hasBrightDataUnlockerConfig() {
   return Boolean(
     process.env.BRIGHT_DATA_API_KEY &&
       process.env.BRIGHT_DATA_FETCH_URL &&
       process.env.BRIGHT_DATA_UNLOCKER_ZONE
   );
+}
+
+function extractJsonObject(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+    if (fenced) {
+      try {
+        return JSON.parse(fenced);
+      } catch {
+        return null;
+      }
+    }
+    const first = value.indexOf("{");
+    const last = value.lastIndexOf("}");
+    if (first >= 0 && last > first) {
+      try {
+        return JSON.parse(value.slice(first, last + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+async function runGoogleStructured(prompt, schemaHint) {
+  const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+  const model = process.env.GOOGLE_MODEL || "gemini-2.5-flash";
+  if (!apiKey) throw new Error("Google API key is not configured.");
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Return only valid JSON. Do not wrap it in markdown.",
+                schemaHint,
+                prompt
+              ].join("\n\n")
+            }
+          ]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: "application/json"
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Google Gemini request failed (${response.status}): ${detail.slice(0, 220)}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("\n") || "";
+  const parsed = extractJsonObject(text);
+  if (!parsed) throw new Error("Google Gemini returned non-JSON output.");
+  return parsed;
 }
 
 function sanitizeSource(item, index) {
@@ -401,6 +495,34 @@ function sourceEvidence(source, product) {
   return evidence.slice(0, 4);
 }
 
+function normalizeRealInfluencerExtraction(value) {
+  const sourceTypes = new Set(["profile", "post", "article", "searchResult"]);
+  const confidenceValues = new Set(["Low", "Medium", "High"]);
+  const candidates = Array.isArray(value?.candidates) ? value.candidates : [];
+  return {
+    candidates: candidates.slice(0, 12).map((candidate) => {
+      const normalized = {
+        displayName: String(candidate?.displayName || candidate?.name || "Public creator result"),
+        platform: String(candidate?.platform || "Public web"),
+        sourceUrl: String(candidate?.sourceUrl || candidate?.url || candidate?.profileUrl || ""),
+        sourceTitle: String(candidate?.sourceTitle || candidate?.title || "Public source result"),
+        sourceDescription: String(candidate?.sourceDescription || candidate?.description || "Public search result."),
+        niche: String(candidate?.niche || "Creator discovery result"),
+        matchReason: String(candidate?.matchReason || candidate?.reason || "Matched by public source evidence."),
+        evidence: Array.isArray(candidate?.evidence) && candidate.evidence.length
+          ? candidate.evidence.slice(0, 4).map((item) => String(item))
+          : ["Matched by public source evidence."],
+        confidence: confidenceValues.has(candidate?.confidence) ? candidate.confidence : "Medium",
+        sourceType: sourceTypes.has(candidate?.sourceType) ? candidate.sourceType : "searchResult"
+      };
+      if (candidate?.handle) normalized.handle = String(candidate.handle).replace(/^@/, "");
+      if (candidate?.profileUrl) normalized.profileUrl = String(candidate.profileUrl);
+      return normalized;
+    }),
+    caveat: String(value?.caveat || "AI extraction normalized from public source evidence.")
+  };
+}
+
 function fallbackRealInfluencers(input, sources) {
   return sources
     .filter((source) => source.link)
@@ -430,18 +552,36 @@ function fallbackRealInfluencers(input, sources) {
 
 async function extractRealInfluencers(input, sources) {
   const fallback = fallbackRealInfluencers(input, sources);
-  if (!hasOpenAIConfig() || !fallback.length) {
+  const provider = configuredAIProvider();
+  if (provider === "local" || !fallback.length) {
     return {
       candidates: fallback,
       usedOpenAIAgents: false,
-      caveat: "OpenAI extraction unavailable; displayed deterministic Bright Data source extraction."
+      caveat: "AI extraction unavailable; displayed deterministic Bright Data source extraction."
     };
   }
 
   try {
-    const result = await run(
-      realInfluencerExtractionAgent,
-      JSON.stringify({
+    const payload = {
+      product: input.product,
+      goal: input.goal,
+      platform: input.platform,
+      audience: input.audience,
+      sources,
+      guardrail: "Never invent fields that are not visible in the supplied sources."
+    };
+    const finalOutput =
+      provider === "google"
+        ? await runGoogleStructured(
+            JSON.stringify(payload),
+            [
+              "Schema: {\"candidates\":[{\"displayName\":\"string\",\"handle\":\"optional string\",\"platform\":\"string\",\"profileUrl\":\"optional string\",\"sourceUrl\":\"string\",\"sourceTitle\":\"string\",\"sourceDescription\":\"string\",\"niche\":\"string\",\"matchReason\":\"string\",\"evidence\":[\"string\"],\"confidence\":\"Low|Medium|High\",\"sourceType\":\"profile|post|article|searchResult\"}],\"caveat\":\"string\"}",
+              "Extract real public creator or influencer candidates from Bright Data search results. Use only names, handles, platforms, URLs, and evidence visible in source titles, hostnames, URLs, and descriptions. Do not invent follower counts, emails, analytics, contact data, or profile URLs."
+            ].join("\n")
+          )
+        : (await run(
+            realInfluencerExtractionAgent,
+            JSON.stringify({
         product: input.product,
         goal: input.goal,
         platform: input.platform,
@@ -449,14 +589,14 @@ async function extractRealInfluencers(input, sources) {
         sources,
         guardrail: "Never invent fields that are not visible in the supplied sources."
       }),
-      { maxTurns: 3 }
-    );
-    const parsed = RealInfluencerExtraction.safeParse(result.finalOutput);
+            { maxTurns: 3 }
+          )).finalOutput;
+    const parsed = RealInfluencerExtraction.safeParse(normalizeRealInfluencerExtraction(finalOutput));
     if (!parsed.success) {
       return {
         candidates: fallback,
         usedOpenAIAgents: true,
-        caveat: "OpenAI extraction validation failed; displayed deterministic Bright Data source extraction."
+        caveat: `${configuredAIDisplayName()} extraction validation failed; displayed deterministic Bright Data source extraction.`
       };
     }
 
@@ -480,7 +620,7 @@ async function extractRealInfluencers(input, sources) {
     return {
       candidates: fallback,
       usedOpenAIAgents: false,
-      caveat: `OpenAI extraction unavailable: ${error instanceof Error ? error.message : "unknown error"}`
+      caveat: `${configuredAIDisplayName()} extraction unavailable: ${error instanceof Error ? error.message : "unknown error"}`
     };
   }
 }
@@ -646,18 +786,37 @@ function localCreatorResearchBrief({ product }, creator, sources, scrapedTexts) 
 }
 
 async function buildAgentBrief(input, brightDataResult) {
-  if (!hasOpenAIConfig()) {
+  const provider = configuredAIProvider();
+  if (provider === "local") {
     return {
       brief: localProductBrief(input, brightDataResult.sources),
       usedOpenAIAgents: false,
-      agentNote: "OPENAI_API_KEY is not configured; returned deterministic local brief."
+      agentNote: "No AI provider key is configured; returned deterministic local brief."
     };
   }
 
   try {
-    const result = await run(
-      productSignalAgent,
-      JSON.stringify({
+    const payload = {
+      product: input.product,
+      goal: input.goal,
+      platform: input.platform,
+      audience: input.audience,
+      brightDataSources: brightDataResult.sources,
+      guardrail:
+        "Only summarize product demand context. Do not infer real creator analytics or social scraping."
+    };
+    const finalOutput =
+      provider === "google"
+        ? await runGoogleStructured(
+            JSON.stringify(payload),
+            [
+              "Schema: {\"summary\":\"string\",\"demandSignals\":[\"string\"],\"searchAngles\":[\"string\"],\"outreachCues\":[\"string\"],\"caution\":\"string\"}",
+              "Summarize public product research for a creator marketing workflow. Use only supplied Bright Data search snippets and product context. If evidence is thin, say so plainly."
+            ].join("\n")
+          )
+        : (await run(
+            productSignalAgent,
+            JSON.stringify({
         product: input.product,
         goal: input.goal,
         platform: input.platform,
@@ -666,45 +825,73 @@ async function buildAgentBrief(input, brightDataResult) {
         guardrail:
           "Only summarize product demand context. Do not infer real creator analytics or social scraping."
       }),
-      { maxTurns: 3 }
-    );
+            { maxTurns: 3 }
+          )).finalOutput;
 
-    const parsed = ProductBrief.safeParse(result.finalOutput);
+    const parsed = ProductBrief.safeParse(finalOutput);
     if (!parsed.success) {
       return {
         brief: localProductBrief(input, brightDataResult.sources),
         usedOpenAIAgents: true,
-        agentNote: "OpenAI Agents SDK ran, but output validation failed; returned deterministic local brief."
+        agentNote: `${configuredAIDisplayName()} ran, but output validation failed; returned deterministic local brief.`
       };
     }
 
     return {
       brief: parsed.data,
       usedOpenAIAgents: true,
-      agentNote: "OpenAI Agents SDK generated this brief from the supplied product context and Bright Data snippets."
+      agentNote: `${configuredAIDisplayName()} generated this brief from the supplied product context and Bright Data snippets.`
     };
   } catch (error) {
     return {
       brief: localProductBrief(input, brightDataResult.sources),
       usedOpenAIAgents: false,
-      agentNote: `OpenAI Agents SDK was unavailable: ${error instanceof Error ? error.message : "unknown error"}`
+      agentNote: `${configuredAIDisplayName()} was unavailable: ${error instanceof Error ? error.message : "unknown error"}`
     };
   }
 }
 
 async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) {
-  if (!hasOpenAIConfig()) {
+  const provider = configuredAIProvider();
+  if (provider === "local") {
     return {
       brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
       usedOpenAIAgents: false,
-      agentNote: "OPENAI_API_KEY is not configured; returned deterministic local creator enrichment."
+      agentNote: "No AI provider key is configured; returned deterministic local creator enrichment."
     };
   }
 
   try {
-    const result = await run(
-      creatorResearchAgent,
-      JSON.stringify({
+    const payload = {
+      product: input.product || "the searched product",
+      goal: input.goal,
+      platform: input.platform,
+      audience: input.audience,
+      creator: {
+        id: creator.id,
+        name: creator.name,
+        niche: creator.niche,
+        platforms: creator.platforms,
+        contentThemes: creator.contentThemes,
+        whyMatch: creator.whyMatch
+      },
+      brightDataSources: sources,
+      scrapedPageSnippets: scrapedTexts,
+      guardrail:
+        "Use public web discovery context only. Do not make up real metrics, emails, verification, social profile claims, or conversion analytics."
+    };
+    const finalOutput =
+      provider === "google"
+        ? await runGoogleStructured(
+            JSON.stringify(payload),
+            [
+              "Schema: {\"audienceDemandTerms\":[\"string\"],\"agentSummary\":\"string\",\"outreachAngle\":\"string\",\"confidence\":\"Low|Medium|High\",\"caveat\":\"string\"}",
+              "Summarize how public web context supports this creator niche fit and outreach angle. Do not invent metrics, emails, verification, profile claims, or analytics."
+            ].join("\n")
+          )
+        : (await run(
+            creatorResearchAgent,
+            JSON.stringify({
         product: input.product || "the searched product",
         goal: input.goal,
         platform: input.platform,
@@ -722,28 +909,28 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
         guardrail:
           "Use public web discovery context only. Do not make up real metrics, emails, verification, social profile claims, or conversion analytics."
       }),
-      { maxTurns: 3 }
-    );
+            { maxTurns: 3 }
+          )).finalOutput;
 
-    const parsed = CreatorResearchBrief.safeParse(result.finalOutput);
+    const parsed = CreatorResearchBrief.safeParse(finalOutput);
     if (!parsed.success) {
       return {
         brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
         usedOpenAIAgents: true,
-        agentNote: "OpenAI Agents SDK ran, but creator enrichment validation failed; returned deterministic local enrichment."
+        agentNote: `${configuredAIDisplayName()} ran, but creator enrichment validation failed; returned deterministic local enrichment.`
       };
     }
 
     return {
       brief: parsed.data,
       usedOpenAIAgents: true,
-      agentNote: "OpenAI Agents SDK summarized Bright Data creator discovery context."
+      agentNote: `${configuredAIDisplayName()} summarized Bright Data creator discovery context.`
     };
   } catch (error) {
     return {
       brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
       usedOpenAIAgents: false,
-      agentNote: `OpenAI Agents SDK was unavailable: ${error instanceof Error ? error.message : "unknown error"}`
+      agentNote: `${configuredAIDisplayName()} was unavailable: ${error instanceof Error ? error.message : "unknown error"}`
     };
   }
 }
@@ -819,8 +1006,8 @@ app.get("/api/integrations/status", (_request, response) => {
       country: process.env.BRIGHT_DATA_COUNTRY || "us"
     },
     openaiAgents: {
-      configured: hasOpenAIConfig(),
-      model: process.env.OPENAI_MODEL || "gpt-5.5"
+      configured: configuredAIProvider() !== "local",
+      model: configuredAIModel()
     }
   });
 });
@@ -881,7 +1068,7 @@ app.post("/api/creator-enrichment", async (request, response) => {
     },
     openaiAgents: {
       used: enrichments.some((item) => item.openaiAgentsUsed),
-      model: process.env.OPENAI_MODEL || "gpt-5.5"
+      model: configuredAIModel()
     },
     enrichments,
     disclaimer:
@@ -909,7 +1096,7 @@ app.post("/api/real-influencers", async (request, response) => {
     },
     openaiAgents: {
       used: discovery.usedOpenAIAgents,
-      model: process.env.OPENAI_MODEL || "gpt-5.5"
+      model: configuredAIModel()
     },
     influencers: discovery.candidates,
     caveat: discovery.caveat,

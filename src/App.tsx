@@ -713,7 +713,7 @@ function ResultsScreen({
               <Loader2 className="h-5 w-5 animate-spin text-signal-700" />
               <div>
                 <h2 className="text-lg font-semibold">Finding real public influencer results</h2>
-                <p className="mt-1 text-sm text-muted">Bright Data is searching public web results and OpenAI Agents is structuring source-backed candidates.</p>
+                <p className="mt-1 text-sm text-muted">Bright Data is searching public web results and the configured AI provider is structuring source-backed candidates.</p>
               </div>
             </div>
             <div className="mt-5 space-y-3">
@@ -828,10 +828,10 @@ function RealResultsBanner({ meta }: { meta: RealInfluencerResponse | null }) {
         <div>
           <p className="font-semibold">Real public influencer results</p>
           <p className="mt-1 text-signal-700">
-            Bright Data discovered {meta?.brightData.sourceCount ?? 0} public source results. OpenAI Agents structured source-backed candidates.
+            Bright Data discovered {meta?.brightData.sourceCount ?? 0} public source results. The configured AI provider structured source-backed candidates.
           </p>
         </div>
-        <span className="live-pill live-pill-agent">{meta?.openaiAgents.used ? "OpenAI extracted" : "Deterministic extraction"}</span>
+        <span className="live-pill live-pill-agent">{meta?.openaiAgents.used ? "AI extracted" : "Deterministic extraction"}</span>
       </div>
       <p className="mt-3 text-xs leading-5 text-signal-700">
         {meta?.disclaimer || "Displayed names and handles come from public search results. No private analytics or contact data is inferred."}
@@ -1115,7 +1115,7 @@ function CreatorEnrichmentStrip({
             <span className="live-pill">{enrichment.scrapedPageCount} pages scraped</span>
           ) : null}
           <span className={`live-pill ${toneClass(enrichment.confidence)}`}>{enrichment.confidence} confidence</span>
-          {enrichment.openaiAgentsUsed ? <span className="live-pill live-pill-agent">OpenAI agent</span> : null}
+          {enrichment.openaiAgentsUsed ? <span className="live-pill live-pill-agent">AI provider</span> : null}
         </div>
       </div>
       <p className="mt-3 text-sm leading-6 text-muted">{enrichment.agentSummary}</p>
@@ -1552,7 +1552,7 @@ function IntegrationUseFlags({ intelligence }: { intelligence: ProductIntelligen
       </div>
       <div className="integration-flag">
         <span className={intelligence.openaiAgents.used ? "flag-dot flag-on" : "flag-dot"} />
-        OpenAI Agents SDK {intelligence.openaiAgents.used ? "used for summary" : "not used for this run"}
+        AI provider {intelligence.openaiAgents.used ? "used for summary" : "not used for this run"}
       </div>
       <p className="text-muted">{intelligence.openaiAgents.note}</p>
     </div>
@@ -1570,9 +1570,9 @@ function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
           detail={status?.brightData.configured ? `SERP zone ready, ${status.brightData.country.toUpperCase()} search` : "Missing local server config"}
         />
         <ReadinessRow
-          label="OpenAI Agents SDK"
+          label="AI provider"
           ready={Boolean(status?.openaiAgents.configured)}
-          detail={status?.openaiAgents.configured ? `${status.openaiAgents.model} configured` : "Add OPENAI_API_KEY to enable live agent brief"}
+          detail={status?.openaiAgents.configured ? `${status.openaiAgents.model} configured` : "Add GOOGLE_API_KEY or OPENAI_API_KEY to enable live AI extraction"}
         />
       </div>
       <p className="mt-4 text-xs leading-5 text-muted">

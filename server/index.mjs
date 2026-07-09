@@ -154,17 +154,17 @@ function configuredAIModel() {
   if (configuredAIProvider() === "nvidia") return process.env.NVIDIA_MODEL || "z-ai/glm-5.2";
   if (configuredAIProvider() === "google") return process.env.GOOGLE_MODEL || "gemini-3.5-flash";
   if (configuredAIProvider() === "openai") return process.env.OPENAI_MODEL || "gpt-5.5";
-  return "deterministic-local";
+  return "rules-based-source-extraction";
 }
 
 function configuredAIDisplayName() {
   if (configuredAIProvider() === "nvidia") return "NVIDIA NIM";
   if (configuredAIProvider() === "google") return "Google Gemini";
   if (configuredAIProvider() === "openai") return "OpenAI Agents SDK";
-  return "Deterministic local extraction";
+  return "Rules-based source extraction";
 }
 
-function friendlyAIUnavailableNote(error, fallbackLabel = "deterministic local fallback") {
+function friendlyAIUnavailableNote(error, fallbackLabel = "rules-based source extraction") {
   const message = error instanceof Error ? error.message : String(error || "");
   if (/429|quota|rate.?limit|too many requests/i.test(message)) {
     return `${configuredAIDisplayName()} hit a quota or rate limit; returned ${fallbackLabel}.`;
@@ -784,7 +784,7 @@ async function extractRealInfluencers(input, sources) {
     return {
       candidates: fallback,
       usedOpenAIAgents: false,
-      caveat: "AI extraction unavailable; displayed deterministic Bright Data source extraction."
+      caveat: "AI extraction unavailable; displayed rules-based Bright Data source extraction."
     };
   }
 
@@ -830,7 +830,7 @@ async function extractRealInfluencers(input, sources) {
       return {
         candidates: fallback,
         usedOpenAIAgents: true,
-        caveat: `${configuredAIDisplayName()} extraction validation failed; displayed deterministic Bright Data source extraction.`
+        caveat: `${configuredAIDisplayName()} extraction validation failed; displayed rules-based Bright Data source extraction.`
       };
     }
 
@@ -854,7 +854,7 @@ async function extractRealInfluencers(input, sources) {
     return {
       candidates: fallback,
       usedOpenAIAgents: false,
-      caveat: friendlyAIUnavailableNote(error, "deterministic Bright Data source extraction")
+      caveat: friendlyAIUnavailableNote(error, "rules-based Bright Data source extraction")
     };
   }
 }
@@ -933,24 +933,24 @@ function localProductBrief({ product, goal, platform, audience }, sources) {
 
   const demandSignals = hasWorkwear
     ? [
-        "Questions about fit, sizing, styling context, and direct shopping links are the strongest local signals.",
+        "Questions about fit, sizing, styling context, and direct shopping links are the strongest public demand signals.",
         "Office and warm-weather use cases are likely clearer than generic fashion positioning.",
         "Creator evidence should emphasize audience requests for practical styling and repeatable outfits."
       ]
     : hasBeauty
       ? [
-          "Questions about routine fit, ingredients, shade or skin-type matching, and visible outcomes are the strongest local signals.",
+          "Questions about routine fit, ingredients, shade or skin-type matching, and visible outcomes are the strongest public demand signals.",
           "Creator evidence should prioritize educational content and saved/commented product questions.",
           "Offer copy should avoid medical or guaranteed-result language."
         ]
       : hasFitness
         ? [
-            "Questions about routine integration, taste or comfort, beginner suitability, and consistency are the strongest local signals.",
+            "Questions about routine integration, taste or comfort, beginner suitability, and consistency are the strongest public demand signals.",
             "Creator evidence should prioritize habit-building content and audience requests for practical plans.",
             "Offer copy should avoid health outcome guarantees."
           ]
         : [
-            "Audience questions about use case, price, comparison, and purchase links are the strongest local signals.",
+            "Audience questions about use case, price, comparison, and purchase links are the strongest public demand signals.",
             "Creator evidence should connect the product to repeated comment themes, not follower count.",
             "Offer copy should stay specific to the creator's niche and the brand's launch goal."
           ];
@@ -969,7 +969,7 @@ function localProductBrief({ product, goal, platform, audience }, sources) {
     outreachCues: [
       `Reference the creator's niche and the clearest audience signal before mentioning ${product}.`,
       platform ? `Keep the ask native to ${platform} and reference the visible public source that matched.` : "Keep the ask tied to the recommended campaign format.",
-      "Use copy, save draft, or local campaign planning only."
+      "Use source-backed copy and review the linked public evidence before outreach."
     ],
     caution: "Product research is public web context. Verify creator availability, rates, and analytics before committing budget."
   };
@@ -1037,7 +1037,7 @@ function localCreatorResearchBrief({ product }, creator, sources, scrapedTexts) 
     audienceDemandTerms,
     agentSummary: sourceCount
       ? `Bright Data found public web context around ${creator.niche.toLowerCase()} and ${product || "this product category"}. Treat it as discovery context, not verified analytics for ${creator.name}.`
-      : `No strong public web enrichment was returned for ${creator.niche.toLowerCase()}; use this only as fallback context.`,
+      : `No strong public web enrichment was returned for ${creator.niche.toLowerCase()}; use this only as secondary context.`,
     outreachAngle: `${creator.suggestedAngle || creator.whyMatch}`.slice(0, 180),
     confidence: sourceCount >= 4 ? "Medium" : "Low",
     caveat: "Live sources are public web discovery data. They are not verified creator platform analytics."
@@ -1050,7 +1050,7 @@ async function buildAgentBrief(input, brightDataResult) {
     return {
       brief: localProductBrief(input, brightDataResult.sources),
       usedOpenAIAgents: false,
-      agentNote: "No AI provider key is configured; returned deterministic local brief."
+      agentNote: "No AI provider key is configured; returned rules-based source brief."
     };
   }
 
@@ -1099,7 +1099,7 @@ async function buildAgentBrief(input, brightDataResult) {
       return {
         brief: localProductBrief(input, brightDataResult.sources),
         usedOpenAIAgents: true,
-        agentNote: `${configuredAIDisplayName()} ran, but output validation failed; returned deterministic local brief.`
+        agentNote: `${configuredAIDisplayName()} ran, but output validation failed; returned rules-based source brief.`
       };
     }
 
@@ -1112,7 +1112,7 @@ async function buildAgentBrief(input, brightDataResult) {
     return {
       brief: localProductBrief(input, brightDataResult.sources),
       usedOpenAIAgents: false,
-      agentNote: friendlyAIUnavailableNote(error, "deterministic local brief")
+      agentNote: friendlyAIUnavailableNote(error, "rules-based source brief")
     };
   }
 }
@@ -1123,7 +1123,7 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
     return {
       brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
       usedOpenAIAgents: false,
-      agentNote: "No AI provider key is configured; returned deterministic local creator enrichment."
+      agentNote: "No AI provider key is configured; returned rules-based source creator enrichment."
     };
   }
 
@@ -1189,7 +1189,7 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
       return {
         brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
         usedOpenAIAgents: true,
-        agentNote: `${configuredAIDisplayName()} ran, but creator enrichment validation failed; returned deterministic local enrichment.`
+        agentNote: `${configuredAIDisplayName()} ran, but creator enrichment validation failed; returned rules-based source enrichment.`
       };
     }
 
@@ -1202,7 +1202,7 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
     return {
       brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
       usedOpenAIAgents: false,
-      agentNote: friendlyAIUnavailableNote(error, "deterministic local enrichment")
+      agentNote: friendlyAIUnavailableNote(error, "rules-based source enrichment")
     };
   }
 }

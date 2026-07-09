@@ -1,4 +1,5 @@
-import type { Creator, Platform } from "../data/creators";
+export type Platform = "TikTok" | "Instagram" | "YouTube";
+export type CampaignRisk = "Low" | "Medium" | "High";
 
 export type SearchState = {
   product: string;
@@ -6,37 +7,6 @@ export type SearchState = {
   budget: string;
   platform: Platform | "Any";
   audience: string;
-};
-
-export type RankedCreator = Creator & {
-  prototypeMatchScore: number;
-  matchReasons: string[];
-};
-
-export type Draft = {
-  id: string;
-  creatorId: string;
-  product: string;
-  message: string;
-  createdAt: string;
-};
-
-export type TimelineStatus = "Pending" | "Complete" | "Blocked";
-
-export type TimelineStep = {
-  day: number;
-  title: string;
-  status: TimelineStatus;
-};
-
-export type Campaign = {
-  id: string;
-  creatorId: string;
-  product: string;
-  budget: string;
-  campaign: string;
-  createdAt: string;
-  steps: TimelineStep[];
 };
 
 export type IntegrationStatus = {
@@ -83,43 +53,6 @@ export type ProductIntelligence = {
     outreachCues: string[];
     caution: string;
   };
-  disclaimer: string;
-};
-
-export type CreatorEnrichment = {
-  creatorId: string;
-  sourceCount: number;
-  scrapedPageCount: number;
-  sources: Array<{
-    title: string;
-    source: string;
-    description: string;
-    link?: string;
-    rank: number;
-  }>;
-  audienceDemandTerms: string[];
-  agentSummary: string;
-  outreachAngle: string;
-  confidence: "Low" | "Medium" | "High";
-  caveat: string;
-  brightDataUsed: boolean;
-  openaiAgentsUsed: boolean;
-  agentNote: string;
-  error?: string;
-};
-
-export type CreatorEnrichmentResponse = {
-  product: string;
-  brightData: {
-    used: boolean;
-    mode: string;
-    enrichedCreators: number;
-  };
-  openaiAgents: {
-    used: boolean;
-    model: string;
-  };
-  enrichments: CreatorEnrichment[];
   disclaimer: string;
 };
 

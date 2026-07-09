@@ -135,25 +135,50 @@ function hasGoogleAIConfig() {
   return Boolean(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY);
 }
 
+function hasNvidiaConfig() {
+  return Boolean(process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY);
+}
+
 function configuredAIProvider() {
   const preferred = String(process.env.AI_PROVIDER || "").toLowerCase();
+  if ((preferred === "nvidia" || preferred === "nim") && hasNvidiaConfig()) return "nvidia";
   if (preferred === "google" && hasGoogleAIConfig()) return "google";
   if (preferred === "openai" && hasOpenAIConfig()) return "openai";
   if (hasOpenAIConfig()) return "openai";
+  if (hasNvidiaConfig()) return "nvidia";
   if (hasGoogleAIConfig()) return "google";
   return "local";
 }
 
 function configuredAIModel() {
+  if (configuredAIProvider() === "nvidia") return process.env.NVIDIA_MODEL || "z-ai/glm-5.2";
   if (configuredAIProvider() === "google") return process.env.GOOGLE_MODEL || "gemini-3.5-flash";
   if (configuredAIProvider() === "openai") return process.env.OPENAI_MODEL || "gpt-5.5";
   return "deterministic-local";
 }
 
 function configuredAIDisplayName() {
+  if (configuredAIProvider() === "nvidia") return "NVIDIA NIM";
   if (configuredAIProvider() === "google") return "Google Gemini";
   if (configuredAIProvider() === "openai") return "OpenAI Agents SDK";
   return "Deterministic local extraction";
+}
+
+function friendlyAIUnavailableNote(error, fallbackLabel = "deterministic local fallback") {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/429|quota|rate.?limit|too many requests/i.test(message)) {
+    return `${configuredAIDisplayName()} hit a quota or rate limit; returned ${fallbackLabel}.`;
+  }
+  if (/401|403|unauthorized|forbidden|api key|permission/i.test(message)) {
+    return `${configuredAIDisplayName()} credentials were rejected; returned ${fallbackLabel}.`;
+  }
+  if (/abort|timed out|timeout/i.test(message)) {
+    return `${configuredAIDisplayName()} timed out; returned ${fallbackLabel}.`;
+  }
+  if (/unavailable|failed|non-json|validation/i.test(message)) {
+    return `${configuredAIDisplayName()} was unavailable; returned ${fallbackLabel}.`;
+  }
+  return `${configuredAIDisplayName()} could not complete this run; returned ${fallbackLabel}.`;
 }
 
 function hasBrightDataUnlockerConfig() {
@@ -166,7 +191,7 @@ function hasBrightDataUnlockerConfig() {
 
 function googleModelCandidates() {
   const primary = process.env.GOOGLE_MODEL || "gemini-3.5-flash";
-  const fallbacks = String(process.env.GOOGLE_FALLBACK_MODELS || "gemma-4-31b-it,gemini-2.5-flash")
+  const fallbacks = String(process.env.GOOGLE_FALLBACK_MODELS || "gemini-2.5-flash,gemma-4-31b-it")
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
@@ -257,6 +282,61 @@ async function runGoogleStructured(prompt, schemaHint) {
   }
 
   throw new Error(`Google AI models unavailable: ${errors.join(" | ")}`);
+}
+
+async function runNvidiaStructured(prompt, schemaHint) {
+  const apiKey = process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY;
+  if (!apiKey) throw new Error("NVIDIA NIM API key is not configured.");
+
+  const model = process.env.NVIDIA_MODEL || "z-ai/glm-5.2";
+  const baseUrl = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.NVIDIA_MODEL_TIMEOUT_MS || 45000));
+  let response;
+  try {
+    response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: "system",
+            content: "Return compact valid JSON only. Do not wrap it in markdown. Do not include reasoning. Use only the provided context."
+          },
+          {
+            role: "user",
+            content: [schemaHint, prompt].join("\n\n")
+          }
+        ],
+        temperature: 0.15,
+        top_p: 1,
+        max_tokens: Number(process.env.NVIDIA_MAX_TOKENS || 700),
+        stream: false
+      })
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    throw new Error(error instanceof Error && error.name === "AbortError" ? "NVIDIA NIM timed out" : error instanceof Error ? error.message : "NVIDIA NIM request failed");
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`NVIDIA NIM unavailable: ${response.status} ${detail.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || "";
+  const parsed = extractJsonObject(text);
+  if (parsed) return { output: parsed, model };
+  throw new Error("NVIDIA NIM returned non-JSON output");
 }
 
 function sanitizeSource(item, index) {
@@ -462,7 +542,7 @@ function platformFromSource(source) {
   if (text.includes("tiktok")) return "TikTok";
   if (text.includes("youtube")) return "YouTube";
   if (text.includes("pinterest")) return "Pinterest";
-  return source.source || "Public web";
+  return "Public web";
 }
 
 function handleFromSource(source) {
@@ -502,12 +582,47 @@ function displayNameFromSource(source, handle) {
   return source.source || "Public creator result";
 }
 
+function displayNameLooksUsable(value) {
+  return Boolean(value && !/^(read more|more|learn more|view profile|watch now|instagram|tiktok|youtube|public creator result)$/i.test(String(value).trim()));
+}
+
 function sourceTypeFromSource(source) {
   const text = `${source.link || ""} ${source.title || ""}`.toLowerCase();
   if (/instagram\.com\/(p|reel)\//.test(text) || /tiktok\.com\/@.+\/video/.test(text) || /youtube\.com\/shorts/.test(text)) return "post";
   if (/instagram\.com\/[^/]+\/?$/.test(text) || /tiktok\.com\/@[^/]+\/?$/.test(text) || /youtube\.com\/@[^/]+/.test(text)) return "profile";
   if (!/(instagram|tiktok|youtube|pinterest)/.test(text)) return "article";
   return "searchResult";
+}
+
+function textLooksLikeNonCreatorPage(text) {
+  return /\b(official store|official site|shop now|add to cart|where to buy|retailer|brand store|product page|specs|specifications|best budget|best gaming mouse|review roundup|buying guide|rtings|amazon|walmart|target)\b/i.test(text);
+}
+
+function sourceLooksLikeCreatorCandidate(source) {
+  const type = sourceTypeFromSource(source);
+  const text = decodeHtml(`${source.source || ""} ${source.link || ""} ${source.title || ""} ${source.description || ""}`);
+  if (type === "profile" || type === "post") return true;
+  if (/(instagram|tiktok|youtube|pinterest)\.com/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
+  if (/\b(creator|influencer|ugc creator|content creator)\b/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
+  return false;
+}
+
+function candidateLooksLikeCreator(candidate) {
+  const text = decodeHtml([
+    candidate.displayName,
+    candidate.handle,
+    candidate.platform,
+    candidate.sourceUrl,
+    candidate.sourceTitle,
+    candidate.sourceDescription,
+    candidate.niche,
+    candidate.matchReason,
+    ...(candidate.evidence || [])
+  ].join(" "));
+  if (candidate.sourceType === "profile" || candidate.sourceType === "post") return true;
+  if (/(instagram|tiktok|youtube|pinterest)\.com/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
+  if (/\b(creator|influencer|ugc creator|content creator)\b/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
+  return false;
 }
 
 function sourceEvidence(source, product) {
@@ -635,7 +750,7 @@ function normalizeRealInfluencerExtraction(value) {
 
 function fallbackRealInfluencers(input, sources) {
   return sources
-    .filter((source) => source.link)
+    .filter((source) => source.link && sourceLooksLikeCreatorCandidate(source))
     .slice(0, 12)
     .map((source, index) => {
       const handle = handleFromSource(source);
@@ -658,7 +773,8 @@ function fallbackRealInfluencers(input, sources) {
         sourceType,
         matchScore: Math.min(99, Math.max(64, 72 + relevanceScore * 4 - index * 2))
       };
-    });
+    })
+    .filter((candidate) => displayNameLooksUsable(candidate.displayName));
 }
 
 async function extractRealInfluencers(input, sources) {
@@ -683,18 +799,19 @@ async function extractRealInfluencers(input, sources) {
     };
     let usedModel = configuredAIModel();
     const finalOutput =
-      provider === "google"
+      provider === "google" || provider === "nvidia"
         ? await (async () => {
-            const googleResult = await runGoogleStructured(
-            JSON.stringify(payload),
-            [
-              "Schema: {\"candidates\":[{\"displayName\":\"string\",\"handle\":\"optional string\",\"platform\":\"string\",\"profileUrl\":\"optional string\",\"sourceUrl\":\"string\",\"sourceTitle\":\"string\",\"sourceDescription\":\"string\",\"niche\":\"string\",\"matchReason\":\"string\",\"evidence\":[\"string\"],\"confidence\":\"Low|Medium|High\",\"sourceType\":\"profile|post|article|searchResult\"}],\"caveat\":\"string\"}",
-              "Extract real public creator or influencer candidates from Bright Data search results. Use only names, handles, platforms, URLs, and evidence visible in source titles, hostnames, URLs, and descriptions. Do not invent follower counts, emails, analytics, contact data, or profile URLs.",
-              `Keep only candidates where the visible source text is related to this product intent: ${productIntentTerms(input.product).join(", ")}.`
-            ].join("\n")
+            const runStructured = provider === "google" ? runGoogleStructured : runNvidiaStructured;
+            const structuredResult = await runStructured(
+              JSON.stringify(payload),
+              [
+                "Schema: {\"candidates\":[{\"displayName\":\"string\",\"handle\":\"optional string\",\"platform\":\"string\",\"profileUrl\":\"optional string\",\"sourceUrl\":\"string\",\"sourceTitle\":\"string\",\"sourceDescription\":\"string\",\"niche\":\"string\",\"matchReason\":\"string\",\"evidence\":[\"string\"],\"confidence\":\"Low|Medium|High\",\"sourceType\":\"profile|post|article|searchResult\"}],\"caveat\":\"string\"}",
+                "Extract real public creator or influencer candidates from Bright Data search results. Use only names, handles, platforms, URLs, and evidence visible in source titles, hostnames, URLs, and descriptions. Do not invent follower counts, emails, analytics, contact data, or profile URLs.",
+                `Keep only candidates where the visible source text is related to this product intent: ${productIntentTerms(input.product).join(", ")}.`
+              ].join("\n")
             );
-            usedModel = googleResult.model;
-            return googleResult.output;
+            usedModel = structuredResult.model;
+            return structuredResult.output;
           })()
         : (await run(
             realInfluencerExtractionAgent,
@@ -718,7 +835,7 @@ async function extractRealInfluencers(input, sources) {
     }
 
     const candidates = parsed.data.candidates
-      .filter((candidate) => candidate.sourceUrl && candidateRelevanceScore(input.product, candidate) >= 2)
+      .filter((candidate) => candidate.sourceUrl && displayNameLooksUsable(candidate.displayName) && candidateLooksLikeCreator(candidate) && candidateRelevanceScore(input.product, candidate) >= 2)
       .map((candidate, index) => ({
         ...candidate,
         displayName: decodeHtml(candidate.displayName),
@@ -737,7 +854,7 @@ async function extractRealInfluencers(input, sources) {
     return {
       candidates: fallback,
       usedOpenAIAgents: false,
-      caveat: `${configuredAIDisplayName()} extraction unavailable: ${error instanceof Error ? error.message : "unknown error"}`
+      caveat: friendlyAIUnavailableNote(error, "deterministic Bright Data source extraction")
     };
   }
 }
@@ -762,14 +879,15 @@ async function discoverRealInfluencers(input) {
     }
   }
   const relevantSources = sourceBackedResults(input.product, sources);
-  const extraction = await extractRealInfluencers(input, relevantSources);
+  const creatorSources = relevantSources.filter(sourceLooksLikeCreatorCandidate).slice(0, 8);
+  const extraction = await extractRealInfluencers(input, creatorSources);
   return {
-    sources: relevantSources,
+    sources: creatorSources,
     candidates: extraction.candidates,
     usedOpenAIAgents: extraction.usedOpenAIAgents,
-    caveat: relevantSources.length
+    caveat: creatorSources.length
       ? extraction.caveat
-      : `Bright Data returned ${sources.length} public sources, but none showed enough visible product relevance for "${input.product}". Try a more specific product phrase.`,
+      : `Bright Data returned ${sources.length} public sources, but none showed enough visible creator evidence for "${input.product}". Try a more specific product phrase.`,
     brightDataUsed: results.some((result) => result.ok)
   };
 }
@@ -948,18 +1066,19 @@ async function buildAgentBrief(input, brightDataResult) {
     };
     let usedModel = configuredAIModel();
     const finalOutput =
-      provider === "google"
+      provider === "google" || provider === "nvidia"
         ? await (async () => {
-            const googleResult = await runGoogleStructured(
-            JSON.stringify(payload),
-            [
-              "Schema: {\"summary\":\"string\",\"demandSignals\":[\"string\"],\"searchAngles\":[\"string\"],\"outreachCues\":[\"string\"],\"caution\":\"string\"}",
-              "Summarize public product research for a creator marketing workflow. Use only supplied Bright Data search snippets and product context. If evidence is thin, say so plainly.",
-              `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
-            ].join("\n")
+            const runStructured = provider === "google" ? runGoogleStructured : runNvidiaStructured;
+            const structuredResult = await runStructured(
+              JSON.stringify(payload),
+              [
+                "Schema: {\"summary\":\"string\",\"demandSignals\":[\"string\"],\"searchAngles\":[\"string\"],\"outreachCues\":[\"string\"],\"caution\":\"string\"}",
+                "Summarize public product research for a creator marketing workflow. Use only supplied Bright Data search snippets and product context. If evidence is thin, say so plainly.",
+                `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
+              ].join("\n")
             );
-            usedModel = googleResult.model;
-            return googleResult.output;
+            usedModel = structuredResult.model;
+            return structuredResult.output;
           })()
         : (await run(
             productSignalAgent,
@@ -993,7 +1112,7 @@ async function buildAgentBrief(input, brightDataResult) {
     return {
       brief: localProductBrief(input, brightDataResult.sources),
       usedOpenAIAgents: false,
-      agentNote: `${configuredAIDisplayName()} was unavailable: ${error instanceof Error ? error.message : "unknown error"}`
+      agentNote: friendlyAIUnavailableNote(error, "deterministic local brief")
     };
   }
 }
@@ -1029,17 +1148,18 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
     };
     let usedModel = configuredAIModel();
     const finalOutput =
-      provider === "google"
+      provider === "google" || provider === "nvidia"
         ? await (async () => {
-            const googleResult = await runGoogleStructured(
-            JSON.stringify(payload),
-            [
-              "Schema: {\"audienceDemandTerms\":[\"string\"],\"agentSummary\":\"string\",\"outreachAngle\":\"string\",\"confidence\":\"Low|Medium|High\",\"caveat\":\"string\"}",
-              "Summarize how public web context supports this creator niche fit and outreach angle. Do not invent metrics, emails, verification, profile claims, or analytics."
-            ].join("\n")
+            const runStructured = provider === "google" ? runGoogleStructured : runNvidiaStructured;
+            const structuredResult = await runStructured(
+              JSON.stringify(payload),
+              [
+                "Schema: {\"audienceDemandTerms\":[\"string\"],\"agentSummary\":\"string\",\"outreachAngle\":\"string\",\"confidence\":\"Low|Medium|High\",\"caveat\":\"string\"}",
+                "Summarize how public web context supports this creator niche fit and outreach angle. Do not invent metrics, emails, verification, profile claims, or analytics."
+              ].join("\n")
             );
-            usedModel = googleResult.model;
-            return googleResult.output;
+            usedModel = structuredResult.model;
+            return structuredResult.output;
           })()
         : (await run(
             creatorResearchAgent,
@@ -1082,7 +1202,7 @@ async function buildCreatorResearchBrief(input, creator, sources, scrapedTexts) 
     return {
       brief: localCreatorResearchBrief(input, creator, sources, scrapedTexts),
       usedOpenAIAgents: false,
-      agentNote: `${configuredAIDisplayName()} was unavailable: ${error instanceof Error ? error.message : "unknown error"}`
+      agentNote: friendlyAIUnavailableNote(error, "deterministic local enrichment")
     };
   }
 }
@@ -1159,7 +1279,9 @@ app.get("/api/integrations/status", (_request, response) => {
     },
     openaiAgents: {
       configured: configuredAIProvider() !== "local",
-      model: configuredAIModel()
+      model: configuredAIModel(),
+      provider: configuredAIProvider(),
+      displayName: configuredAIDisplayName()
     }
   });
 });

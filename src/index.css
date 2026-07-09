@@ -160,11 +160,11 @@
   }
 
   .filter-select {
-    @apply inline-flex min-h-10 items-center gap-2 rounded-full border border-line bg-white px-3 text-sm font-medium text-muted shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:border-signal-900;
+    @apply inline-flex min-h-10 min-w-40 items-center gap-2 rounded-full border border-line bg-white px-3 text-sm font-medium text-muted shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:border-signal-900;
   }
 
   .filter-select select {
-    @apply border-0 bg-transparent font-semibold text-ink outline-none;
+    @apply min-w-0 border-0 bg-transparent font-semibold text-ink outline-none;
   }
 
   .prototype-disclaimer {
@@ -592,6 +592,16 @@
   .secondary-button,
   .ghost-button {
     width: 100%;
+  }
+
+  .filter-select {
+    min-height: 48px;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .filter-select select {
+    max-width: 58%;
   }
 
   .creator-card {

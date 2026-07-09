@@ -44,6 +44,15 @@ const campaignTypes = ["Try on reel", "Story set", "UGC only", "Affiliate"];
 const offerTypes = ["$900 flat", "Gifted plus commission", "Custom"];
 const tones: OutreachTone[] = ["Friendly", "Professional", "Direct"];
 const statusCycle: TimelineStatus[] = ["Pending", "Complete", "Blocked"];
+type RealSortMode = "match" | "cost" | "risk" | "evidence";
+type RealEvidenceFilter = "Any" | RealInfluencer["sourceType"];
+type RealCostFilter = "Any" | "Lower" | "Medium" | "Higher";
+const evidenceLabels = {
+  profile: "Creator profile",
+  post: "Creator post",
+  article: "Article or list",
+  searchResult: "Search result"
+} satisfies Record<RealInfluencer["sourceType"], string>;
 const avatarSizeClass = {
   small: "avatar-small",
   default: "avatar-default",
@@ -100,6 +109,23 @@ function riskOrder(value: CampaignRisk) {
   return 2;
 }
 
+function confidenceOrder(value: RealInfluencer["confidence"]) {
+  if (value === "High") return 0;
+  if (value === "Medium") return 1;
+  return 2;
+}
+
+function sourceTypeOrder(value: RealInfluencer["sourceType"]) {
+  if (value === "profile") return 0;
+  if (value === "post") return 1;
+  if (value === "searchResult") return 2;
+  return 3;
+}
+
+function realInfluencerEvidenceLabel(value: RealInfluencer["sourceType"]) {
+  return evidenceLabels[value];
+}
+
 function realInfluencerRisk(influencer: RealInfluencer): CampaignRisk {
   if (influencer.confidence === "Low" || influencer.sourceType === "article") return "High";
   if (influencer.confidence === "High" && (influencer.sourceType === "profile" || influencer.sourceType === "post")) return "Low";
@@ -150,8 +176,11 @@ export default function App() {
   const [formState, setFormState] = useState<SearchState>(readStoredSearch);
   const [validationError, setValidationError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
-  const [sortMode, setSortMode] = useState<"match" | "cost" | "risk">("match");
+  const [sortMode, setSortMode] = useState<RealSortMode>("match");
   const [riskFilter, setRiskFilter] = useState<CampaignRisk | "Any">("Any");
+  const [platformFilter, setPlatformFilter] = useState("Any");
+  const [evidenceFilter, setEvidenceFilter] = useState<RealEvidenceFilter>("Any");
+  const [costFilter, setCostFilter] = useState<RealCostFilter>("Any");
   const [shortlistIds, setShortlistIds] = useState<string[]>(() => readLocal(storageKeys.shortlist, []));
   const [drafts, setDrafts] = useState<Draft[]>(() => readLocal(storageKeys.drafts, []));
   const [campaigns, setCampaigns] = useState<Campaign[]>(() => readLocal(storageKeys.campaigns, []));
@@ -415,6 +444,12 @@ export default function App() {
             setSortMode={setSortMode}
             riskFilter={riskFilter}
             setRiskFilter={setRiskFilter}
+            platformFilter={platformFilter}
+            setPlatformFilter={setPlatformFilter}
+            evidenceFilter={evidenceFilter}
+            setEvidenceFilter={setEvidenceFilter}
+            costFilter={costFilter}
+            setCostFilter={setCostFilter}
             intelligence={intelligence}
             intelligenceLoading={intelligenceLoading}
             intelligenceError={intelligenceError}
@@ -646,6 +681,12 @@ function ResultsScreen({
   setSortMode,
   riskFilter,
   setRiskFilter,
+  platformFilter,
+  setPlatformFilter,
+  evidenceFilter,
+  setEvidenceFilter,
+  costFilter,
+  setCostFilter,
   intelligence,
   intelligenceLoading,
   intelligenceError,
@@ -662,10 +703,16 @@ function ResultsScreen({
   setFormState: (next: SearchState) => void;
   submitSearch: (event: FormEvent) => void;
   validationError: string;
-  sortMode: "match" | "cost" | "risk";
-  setSortMode: (mode: "match" | "cost" | "risk") => void;
+  sortMode: RealSortMode;
+  setSortMode: (mode: RealSortMode) => void;
   riskFilter: CampaignRisk | "Any";
   setRiskFilter: (risk: CampaignRisk | "Any") => void;
+  platformFilter: string;
+  setPlatformFilter: (platform: string) => void;
+  evidenceFilter: RealEvidenceFilter;
+  setEvidenceFilter: (evidence: RealEvidenceFilter) => void;
+  costFilter: RealCostFilter;
+  setCostFilter: (cost: RealCostFilter) => void;
   intelligence: ProductIntelligence | null;
   intelligenceLoading: boolean;
   intelligenceError: string;
@@ -678,14 +725,34 @@ function ResultsScreen({
   openRealOutreach: (influencer: RealInfluencer) => void;
 }) {
   const showRealResults = realInfluencers.length > 0;
+  const platformOptions = useMemo(() => {
+    const values = [...new Set(realInfluencers.map((influencer) => influencer.platform).filter(Boolean))].sort();
+    return [
+      { label: "All platforms", value: "Any" },
+      ...values.map((platform) => ({ label: platform, value: platform }))
+    ];
+  }, [realInfluencers]);
+  const evidenceOptions = useMemo(() => {
+    const values = [...new Set(realInfluencers.map((influencer) => influencer.sourceType))].sort((a, b) => sourceTypeOrder(a) - sourceTypeOrder(b));
+    return [
+      { label: "All evidence", value: "Any" },
+      ...values.map((sourceType) => ({ label: realInfluencerEvidenceLabel(sourceType), value: sourceType }))
+    ];
+  }, [realInfluencers]);
   const filteredRealInfluencers = realInfluencers
+    .filter((influencer) => platformFilter === "Any" || influencer.platform === platformFilter)
+    .filter((influencer) => evidenceFilter === "Any" || influencer.sourceType === evidenceFilter)
+    .filter((influencer) => costFilter === "Any" || realInfluencerCostTier(influencer) === costFilter)
     .filter((influencer) => riskFilter === "Any" || realInfluencerRisk(influencer) === riskFilter)
     .sort((a, b) => {
       if (sortMode === "cost") return realInfluencerCostRank(a) - realInfluencerCostRank(b);
       if (sortMode === "risk") return riskOrder(realInfluencerRisk(a)) - riskOrder(realInfluencerRisk(b));
+      if (sortMode === "evidence") {
+        return confidenceOrder(a.confidence) - confidenceOrder(b.confidence) || sourceTypeOrder(a.sourceType) - sourceTypeOrder(b.sourceType) || b.matchScore - a.matchScore;
+      }
       return b.matchScore - a.matchScore;
     });
-  const hasActiveRealFilters = riskFilter !== "Any" || sortMode !== "match";
+  const hasActiveRealFilters = platformFilter !== "Any" || evidenceFilter !== "Any" || costFilter !== "Any" || riskFilter !== "Any" || sortMode !== "match";
   return (
     <section className="results-grid">
       <div className="flex flex-col gap-4">
@@ -714,21 +781,48 @@ function ResultsScreen({
           <div className="toolbar-strip mt-5">
             <FilterSelect
               icon={<SlidersHorizontal className="h-4 w-4" />}
-              label="Sort"
+              label="Prioritize"
               value={sortMode}
               options={[
-                { label: "Match", value: "match" },
-                { label: "Cost", value: "cost" },
-                { label: "Risk", value: "risk" }
+                { label: "Best match", value: "match" },
+                { label: "Lowest cost", value: "cost" },
+                { label: "Lowest risk", value: "risk" },
+                { label: "Strongest evidence", value: "evidence" }
               ]}
-              onChange={(value) => setSortMode(value as "match" | "cost" | "risk")}
+              onChange={(value) => setSortMode(value as RealSortMode)}
+            />
+            <FilterSelect
+              icon={<ExternalLink className="h-4 w-4" />}
+              label="Platform"
+              value={platformFilter}
+              options={platformOptions}
+              onChange={setPlatformFilter}
+            />
+            <FilterSelect
+              icon={<BarChart3 className="h-4 w-4" />}
+              label="Evidence"
+              value={evidenceFilter}
+              options={evidenceOptions}
+              onChange={(value) => setEvidenceFilter(value as RealEvidenceFilter)}
+            />
+            <FilterSelect
+              icon={<CircleDollarSign className="h-4 w-4" />}
+              label="Cost band"
+              value={costFilter}
+              options={[
+                { label: "Any cost", value: "Any" },
+                { label: "Lower", value: "Lower" },
+                { label: "Medium", value: "Medium" },
+                { label: "Higher", value: "Higher" }
+              ]}
+              onChange={(value) => setCostFilter(value as RealCostFilter)}
             />
             <FilterSelect
               icon={<ShieldCheck className="h-4 w-4" />}
-              label="Risk"
+              label="Campaign risk"
               value={riskFilter}
               options={[
-                { label: "Any", value: "Any" },
+                { label: "Any risk", value: "Any" },
                 { label: "Low", value: "Low" },
                 { label: "Medium", value: "Medium" },
                 { label: "High", value: "High" }
@@ -745,6 +839,9 @@ function ResultsScreen({
                 onClick={() => {
                   setSortMode("match");
                   setRiskFilter("Any");
+                  setPlatformFilter("Any");
+                  setEvidenceFilter("Any");
+                  setCostFilter("Any");
                 }}
               >
                 Reset filters
@@ -929,7 +1026,7 @@ function FilteredRealResultsState() {
       <SlidersHorizontal className="mx-auto h-8 w-8 text-muted" />
       <h2 className="mt-4 text-xl font-semibold">No creator results match these filters.</h2>
       <p className="mx-auto mt-2 max-w-xl text-muted">
-        Change the risk filter or sort mode to review the remaining source-backed results.
+        Adjust platform, evidence, cost band, or campaign risk to review the remaining source-backed results.
       </p>
     </div>
   );
@@ -954,7 +1051,7 @@ function RealInfluencerCard({
               {influencer.handle ? <span className="chip">@{influencer.handle}</span> : null}
             </div>
             <p className="mt-1 text-sm text-muted">
-              {influencer.niche} | {influencer.platform} | {influencer.sourceType}
+              {influencer.niche} | {influencer.platform} | {realInfluencerEvidenceLabel(influencer.sourceType)}
             </p>
           </div>
         </div>
@@ -965,10 +1062,10 @@ function RealInfluencerCard({
       </div>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <MetricBadge icon={<BarChart3 />} label="Evidence type" value={influencer.sourceType} />
+        <MetricBadge icon={<BarChart3 />} label="Evidence strength" value={influencer.confidence} />
         <MetricBadge icon={<ShieldCheck />} label="Campaign risk" value={realInfluencerRisk(influencer)} tone={riskTone(realInfluencerRisk(influencer))} />
-        <MetricBadge icon={<CircleDollarSign />} label="Cost tier" value={realInfluencerCostTier(influencer)} />
-        <MetricBadge icon={<ExternalLink />} label="Platform" value={influencer.platform} />
+        <MetricBadge icon={<CircleDollarSign />} label="Cost band" value={realInfluencerCostTier(influencer)} />
+        <MetricBadge icon={<ExternalLink />} label="Evidence type" value={realInfluencerEvidenceLabel(influencer.sourceType)} />
       </div>
 
       <div className="why-box">
@@ -1645,7 +1742,7 @@ function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
         <ReadinessRow
           label="AI provider"
           ready={Boolean(status?.openaiAgents.configured)}
-          detail={status?.openaiAgents.configured ? `${status.openaiAgents.model} configured` : "Add GOOGLE_API_KEY or OPENAI_API_KEY to enable live AI extraction"}
+          detail={status?.openaiAgents.configured ? `${status.openaiAgents.displayName}: ${status.openaiAgents.model} configured` : "Add NVIDIA_API_KEY, GOOGLE_API_KEY, or OPENAI_API_KEY to enable live AI extraction"}
         />
       </div>
       <p className="mt-4 text-xs leading-5 text-muted">

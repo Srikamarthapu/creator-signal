@@ -49,6 +49,8 @@ export type IntegrationStatus = {
   openaiAgents: {
     configured: boolean;
     model: string;
+    provider: string;
+    displayName: string;
   };
 };
 

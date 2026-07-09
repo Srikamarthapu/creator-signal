@@ -88,6 +88,39 @@ function toneClass(value: PurchaseIntent | CampaignRisk | TimelineStatus) {
   return "tone-risk";
 }
 
+function riskTone(value: CampaignRisk) {
+  if (value === "Low") return "tone-good";
+  if (value === "Medium") return "tone-watch";
+  return "tone-risk";
+}
+
+function riskOrder(value: CampaignRisk) {
+  if (value === "Low") return 0;
+  if (value === "Medium") return 1;
+  return 2;
+}
+
+function realInfluencerRisk(influencer: RealInfluencer): CampaignRisk {
+  if (influencer.confidence === "Low" || influencer.sourceType === "article") return "High";
+  if (influencer.confidence === "High" && (influencer.sourceType === "profile" || influencer.sourceType === "post")) return "Low";
+  return "Medium";
+}
+
+function realInfluencerCostRank(influencer: RealInfluencer) {
+  const platform = influencer.platform.toLowerCase();
+  if (platform.includes("youtube")) return 3;
+  if (platform.includes("instagram")) return influencer.sourceType === "profile" ? 3 : 2;
+  if (platform.includes("tiktok")) return influencer.sourceType === "profile" ? 2 : 1;
+  return 1;
+}
+
+function realInfluencerCostTier(influencer: RealInfluencer) {
+  const rank = realInfluencerCostRank(influencer);
+  if (rank >= 3) return "Higher";
+  if (rank === 2) return "Medium";
+  return "Lower";
+}
+
 function unsupportedQuery(product: string, results: RankedCreator[]) {
   const query = product.trim().toLowerCase();
   if (!query) return false;
@@ -645,6 +678,14 @@ function ResultsScreen({
   openRealOutreach: (influencer: RealInfluencer) => void;
 }) {
   const showRealResults = realInfluencers.length > 0;
+  const filteredRealInfluencers = realInfluencers
+    .filter((influencer) => riskFilter === "Any" || realInfluencerRisk(influencer) === riskFilter)
+    .sort((a, b) => {
+      if (sortMode === "cost") return realInfluencerCostRank(a) - realInfluencerCostRank(b);
+      if (sortMode === "risk") return riskOrder(realInfluencerRisk(a)) - riskOrder(realInfluencerRisk(b));
+      return b.matchScore - a.matchScore;
+    });
+  const hasActiveRealFilters = riskFilter !== "Any" || sortMode !== "match";
   return (
     <section className="results-grid">
       <div className="flex flex-col gap-4">
@@ -698,7 +739,23 @@ function ResultsScreen({
               {realInfluencersLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               Find real influencers
             </button>
+            {hasActiveRealFilters ? (
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  setSortMode("match");
+                  setRiskFilter("Any");
+                }}
+              >
+                Reset filters
+              </button>
+            ) : null}
           </div>
+          {showRealResults ? (
+            <p className="mt-3 text-sm text-muted">
+              Showing {filteredRealInfluencers.length} of {realInfluencers.length} source-backed creators.
+            </p>
+          ) : null}
           {realInfluencersError ? (
             <p className="mt-3 flex items-center gap-2 text-sm font-medium text-caution">
               <AlertTriangle className="h-4 w-4" />
@@ -727,13 +784,17 @@ function ResultsScreen({
         {!realInfluencersLoading && showRealResults ? (
           <>
             <RealResultsBanner meta={realInfluencerMeta} />
-            {realInfluencers.map((influencer) => (
-              <RealInfluencerCard
-                key={`${influencer.sourceUrl}-${influencer.displayName}`}
-                influencer={influencer}
-                openRealOutreach={openRealOutreach}
-              />
-            ))}
+            {filteredRealInfluencers.length ? (
+              filteredRealInfluencers.map((influencer) => (
+                <RealInfluencerCard
+                  key={`${influencer.sourceUrl}-${influencer.displayName}`}
+                  influencer={influencer}
+                  openRealOutreach={openRealOutreach}
+                />
+              ))
+            ) : (
+              <FilteredRealResultsState />
+            )}
           </>
         ) : !realInfluencersLoading && searchState.product.trim() ? (
           <NoRealResultsState product={searchState.product} refreshRealInfluencers={refreshRealInfluencers} />
@@ -862,6 +923,18 @@ function NoRealResultsState({
   );
 }
 
+function FilteredRealResultsState() {
+  return (
+    <div className="surface p-8 text-center">
+      <SlidersHorizontal className="mx-auto h-8 w-8 text-muted" />
+      <h2 className="mt-4 text-xl font-semibold">No creator results match these filters.</h2>
+      <p className="mx-auto mt-2 max-w-xl text-muted">
+        Change the risk filter or sort mode to review the remaining source-backed results.
+      </p>
+    </div>
+  );
+}
+
 function RealInfluencerCard({
   influencer,
   openRealOutreach
@@ -893,9 +966,9 @@ function RealInfluencerCard({
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <MetricBadge icon={<BarChart3 />} label="Evidence type" value={influencer.sourceType} />
-        <MetricBadge icon={<ShieldCheck />} label="Confidence" value={influencer.confidence} tone={toneClass(influencer.confidence)} />
+        <MetricBadge icon={<ShieldCheck />} label="Campaign risk" value={realInfluencerRisk(influencer)} tone={riskTone(realInfluencerRisk(influencer))} />
+        <MetricBadge icon={<CircleDollarSign />} label="Cost tier" value={realInfluencerCostTier(influencer)} />
         <MetricBadge icon={<ExternalLink />} label="Platform" value={influencer.platform} />
-        <MetricBadge icon={<Search />} label="Data source" value="Bright Data SERP" />
       </div>
 
       <div className="why-box">

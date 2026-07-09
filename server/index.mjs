@@ -78,6 +78,31 @@ const RealInfluencerExtraction = z.object({
   caveat: z.string()
 });
 
+const RealInfluencerForEvaluation = RealInfluencerCandidate.extend({
+  matchScore: z.number().min(0).max(100).optional()
+});
+
+const RealInfluencerEvaluationRequest = ProductIntelligenceRequest.extend({
+  influencers: z.array(RealInfluencerForEvaluation).min(1).max(12)
+});
+
+const RealInfluencerEvaluationItem = z.object({
+  displayName: z.string(),
+  sourceUrl: z.string(),
+  aiScore: z.number().min(0).max(100),
+  verdict: z.enum(["Strong fit", "Good fit", "Check fit", "Weak fit"]),
+  summary: z.string(),
+  strengths: z.array(z.string()).min(1).max(3),
+  risks: z.array(z.string()).min(1).max(3),
+  recommendedUse: z.string(),
+  confidence: z.enum(["Low", "Medium", "High"])
+});
+
+const RealInfluencerEvaluationOutput = z.object({
+  evaluations: z.array(RealInfluencerEvaluationItem).min(1).max(12),
+  note: z.string()
+});
+
 const productSignalAgent = new Agent({
   name: "CreatorSignal Product Research Analyst",
   model: process.env.OPENAI_MODEL || "gpt-5.5",
@@ -117,6 +142,19 @@ const realInfluencerExtractionAgent = new Agent({
     "Return concise structured JSON."
   ].join(" "),
   outputType: RealInfluencerExtraction
+});
+
+const realInfluencerEvaluationAgent = new Agent({
+  name: "CreatorSignal Influencer Fit Evaluator",
+  model: process.env.OPENAI_MODEL || "gpt-5.5",
+  instructions: [
+    "Evaluate source-backed public creator candidates for a brand marketer.",
+    "Use only the supplied source titles, URLs, descriptions, evidence, product, goal, platform, and audience.",
+    "Do not invent followers, rates, emails, demographics, conversion analytics, private contact data, or platform verification.",
+    "Score fit from 0-100 based on visible product relevance, creator/source quality, campaign risk, and commercial usefulness.",
+    "Return concise JSON."
+  ].join(" "),
+  outputType: RealInfluencerEvaluationOutput
 });
 
 function hasBrightDataConfig() {
@@ -628,6 +666,16 @@ function platformFromSource(source) {
 
 function handleFromSource(source) {
   const title = decodeHtml(source.title || "");
+  try {
+    const url = new URL(source.link);
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (/(instagram|tiktok|youtube)/i.test(url.hostname) && parts[0] && !["p", "reel", "shorts", "watch"].includes(parts[0])) {
+      return parts[0].replace(/^@/, "");
+    }
+  } catch {
+    // Fall back to parsing the title when the URL is not usable.
+  }
+
   const patterns = [
     /Instagram\s*[·|-]\s*([a-zA-Z0-9._]+)/i,
     /TikTok\s*[·|-]\s*@?([a-zA-Z0-9._]+)/i,
@@ -637,16 +685,6 @@ function handleFromSource(source) {
   for (const pattern of patterns) {
     const match = title.match(pattern);
     if (match?.[1]) return match[1].trim().replace(/\s+/g, "");
-  }
-
-  try {
-    const url = new URL(source.link);
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (/(instagram|tiktok|youtube)/i.test(url.hostname) && parts[0] && !["p", "reel", "shorts", "watch"].includes(parts[0])) {
-      return parts[0].replace(/^@/, "");
-    }
-  } catch {
-    return undefined;
   }
   return undefined;
 }
@@ -676,15 +714,17 @@ function sourceTypeFromSource(source) {
 }
 
 function textLooksLikeNonCreatorPage(text) {
-  return /\b(official store|official site|shop now|add to cart|where to buy|retailer|brand store|product page|specs|specifications|best budget|best gaming mouse|review roundup|buying guide|rtings|amazon|walmart|target)\b/i.test(text);
+  if (/(tiktok\.com\/(?:discover|content|tag|shop)|instagram\.com\/explore|youtube\.com\/results)/i.test(text)) return true;
+  return /\b(official store|official site|shop now|add to cart|where to buy|retailer|brand store|product page|specs|specifications|best budget|best gaming mouse|review roundup|buying guide|rtings|amazon|walmart|target|tiktok shop affiliate|affiliate marketing|make money|seller center|dropshipping|how to sell|shop affiliate|creator marketplace|seller academy|business tutorial)\b/i.test(text);
 }
 
 function sourceLooksLikeCreatorCandidate(source) {
   const type = sourceTypeFromSource(source);
   const text = decodeHtml(`${source.source || ""} ${source.link || ""} ${source.title || ""} ${source.description || ""}`);
+  if (textLooksLikeNonCreatorPage(text)) return false;
   if (type === "profile" || type === "post") return true;
-  if (/(instagram|tiktok|youtube|pinterest)\.com/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
-  if (/\b(creator|influencer|ugc creator|content creator)\b/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
+  if (/(instagram|tiktok|youtube|pinterest)\.com/i.test(text)) return true;
+  if (/\b(creator|influencer|ugc creator|content creator)\b/i.test(text)) return true;
   return false;
 }
 
@@ -700,9 +740,10 @@ function candidateLooksLikeCreator(candidate) {
     candidate.matchReason,
     ...(candidate.evidence || [])
   ].join(" "));
+  if (textLooksLikeNonCreatorPage(text)) return false;
   if (candidate.sourceType === "profile" || candidate.sourceType === "post") return true;
-  if (/(instagram|tiktok|youtube|pinterest)\.com/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
-  if (/\b(creator|influencer|ugc creator|content creator)\b/i.test(text) && !textLooksLikeNonCreatorPage(text)) return true;
+  if (/(instagram|tiktok|youtube|pinterest)\.com/i.test(text)) return true;
+  if (/\b(creator|influencer|ugc creator|content creator)\b/i.test(text)) return true;
   return false;
 }
 
@@ -751,6 +792,14 @@ function productIntentTerms(product) {
   const intentMap = {
     mouse: ["computer mouse", "gaming mouse", "wireless mouse", "ergonomic mouse", "pc setup", "desk setup", "keyboard"],
     mice: ["computer mouse", "gaming mouse", "wireless mouse", "ergonomic mouse", "pc setup", "desk setup", "keyboard"],
+    keyboard: ["computer keyboard", "mechanical keyboard", "gaming keyboard", "wireless keyboard", "desk setup", "typing setup", "tech review"],
+    phone: ["smartphone", "iphone", "android phone", "samsung galaxy", "mobile phone", "phone review", "tech review", "phone camera", "phone accessories"],
+    smartphone: ["smartphone", "iphone", "android phone", "samsung galaxy", "mobile phone", "phone review", "tech review", "phone camera"],
+    iphone: ["iphone", "smartphone", "apple phone", "ios", "phone review", "tech review", "phone camera"],
+    android: ["android phone", "smartphone", "samsung galaxy", "google pixel", "phone review", "tech review", "phone camera"],
+    laptop: ["laptop", "tech review", "desk setup", "computer setup", "productivity setup", "creator setup"],
+    headphones: ["headphones", "wireless headphones", "audio gear", "tech review", "desk setup"],
+    earbuds: ["earbuds", "wireless earbuds", "audio gear", "tech review", "everyday carry"],
     bottle: ["water bottle", "reusable bottle", "tumbler", "hydration bottle", "insulated bottle"],
     desk: ["desk setup", "standing desk", "home office desk", "workspace", "desk accessories"]
   };
@@ -763,7 +812,22 @@ function productNegativeTerms(product) {
   if (/\b(mouse|mice)\b/.test(normalized)) {
     return ["mickey", "minnie", "disney", "rodent", "rat", "pest control", "trap"];
   }
+  if (/\b(phone|smartphone|iphone|android)\b/.test(normalized)) {
+    return ["phone number", "call center", "customer service", "tiktok shop affiliate", "affiliate marketing", "make money", "seller center", "dropshipping", "how to sell", "course"];
+  }
+  if (/\bkeyboard\b/.test(normalized)) {
+    return ["piano", "music keyboard", "midi", "synthesizer", "typing test", "typing course"];
+  }
   return [];
+}
+
+function productSearchCategory(product) {
+  const normalized = String(product || "").toLowerCase();
+  if (/\b(phone|smartphone|iphone|android)\b/.test(normalized)) return "phone";
+  if (/\b(mouse|mice)\b/.test(normalized)) return "mouse";
+  if (/\bkeyboard\b/.test(normalized)) return "keyboard";
+  if (/\b(laptop|computer|monitor|headphones|earbuds|camera|microphone)\b/.test(normalized)) return "tech";
+  return "general";
 }
 
 function productDiscoveryPhrase(product) {
@@ -772,6 +836,12 @@ function productDiscoveryPhrase(product) {
   const negatives = productNegativeTerms(normalized).map((term) => `-${term.replace(/\s+/g, "-")}`);
   if (/\b(mouse|mice)\b/i.test(normalized)) {
     return [`"${normalized}"`, `"computer mouse"`, `"gaming mouse"`, `"wireless mouse"`, ...negatives].join(" ");
+  }
+  if (productSearchCategory(normalized) === "phone") {
+    return [`"${normalized}"`, `"smartphone"`, `"phone review"`, `"tech review"`, ...negatives].join(" ");
+  }
+  if (productSearchCategory(normalized) === "keyboard") {
+    return [`"${normalized}"`, `"mechanical keyboard"`, `"desk setup"`, `"tech review"`, ...negatives].join(" ");
   }
   if (terms.length > 1) {
     return [`"${normalized}"`, ...terms.slice(1, 4).map((term) => `"${term}"`), ...negatives].join(" ");
@@ -818,12 +888,59 @@ function candidateRelevanceScore(product, candidate) {
   );
 }
 
+function dedupeRealInfluencerCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = [
+      candidate.platform || "Public web",
+      candidate.handle || candidate.profileUrl || candidate.displayName || candidate.sourceUrl
+    ]
+      .join("::")
+      .toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function sourceBackedResults(product, sources) {
   return sources
     .map((source) => ({ source, relevanceScore: sourceRelevanceScore(product, source) }))
     .filter((item) => item.relevanceScore >= 2)
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .map((item) => item.source);
+}
+
+function discoveryQueries(input) {
+  const platform = input.platform && input.platform !== "Any" ? input.platform : "Instagram TikTok YouTube";
+  const productPhrase = productDiscoveryPhrase(input.product);
+  const category = productSearchCategory(input.product);
+  if (category === "phone") {
+    return [
+      `${productPhrase} ${platform} smartphone tech creator review`,
+      `${productPhrase} ${platform} phone reviewer influencer hands on`,
+      `${productPhrase} ${platform} iphone android creator camera review`
+    ];
+  }
+  if (category === "keyboard" || category === "mouse") {
+    return [
+      `${productPhrase} ${platform} desk setup tech creator review`,
+      `${productPhrase} ${platform} gaming setup creator product review`,
+      `${productPhrase} ${platform} influencer hands on review setup`
+    ];
+  }
+  if (category === "tech") {
+    return [
+      `${productPhrase} ${platform} tech creator review`,
+      `${productPhrase} ${platform} creator setup hands on`,
+      `${productPhrase} ${platform} influencer product review`
+    ];
+  }
+  return [
+    `${productPhrase} ${platform} creator review shopping links`,
+    `${productPhrase} ${platform} creator product review`,
+    `${productPhrase} ${platform} influencer hands on demo`
+  ];
 }
 
 function normalizeRealInfluencerExtraction(value) {
@@ -855,7 +972,7 @@ function normalizeRealInfluencerExtraction(value) {
 }
 
 function fallbackRealInfluencers(input, sources) {
-  return sources
+  const candidates = sources
     .filter((source) => source.link && sourceLooksLikeCreatorCandidate(source))
     .slice(0, 12)
     .map((source, index) => {
@@ -880,7 +997,8 @@ function fallbackRealInfluencers(input, sources) {
         matchScore: Math.min(99, Math.max(64, 72 + relevanceScore * 4 - index * 2))
       };
     })
-    .filter((candidate) => displayNameLooksUsable(candidate.displayName));
+    .filter((candidate) => displayNameLooksUsable(candidate.displayName) && candidateLooksLikeCreator(candidate) && candidateRelevanceScore(input.product, candidate) >= 2);
+  return dedupeRealInfluencerCandidates(candidates);
 }
 
 async function extractRealInfluencers(input, sources) {
@@ -892,8 +1010,8 @@ async function extractRealInfluencers(input, sources) {
       candidates: fallback,
       usedOpenAIAgents: false,
       caveat: provider === "local"
-        ? "AI extraction unavailable; displayed rules-based Bright Data source extraction."
-        : "Fast mode: displayed Bright Data source extraction immediately. Set REAL_INFLUENCER_AI_MODE=enhance to let the AI provider rerank results."
+        ? "Bright Data returned source-backed public creator candidates. Add an AI provider key to score them automatically."
+        : "Bright Data source extraction returned immediately; AI fit scoring is evaluated separately on each creator card."
     };
   }
 
@@ -950,7 +1068,7 @@ async function extractRealInfluencers(input, sources) {
       };
     }
 
-    const candidates = parsed.data.candidates
+    const candidates = dedupeRealInfluencerCandidates(parsed.data.candidates
       .filter((candidate) => candidate.sourceUrl && displayNameLooksUsable(candidate.displayName) && candidateLooksLikeCreator(candidate) && candidateRelevanceScore(input.product, candidate) >= 2)
       .map((candidate, index) => ({
         ...candidate,
@@ -959,7 +1077,7 @@ async function extractRealInfluencers(input, sources) {
         sourceDescription: decodeHtml(candidate.sourceDescription),
         evidence: candidate.evidence.map(decodeHtml),
         matchScore: Math.min(99, Math.max(64, 78 + candidateRelevanceScore(input.product, candidate) * 3 - index * 2))
-      }));
+      })));
 
     return {
       candidates: candidates.length ? candidates : fallback,
@@ -975,14 +1093,178 @@ async function extractRealInfluencers(input, sources) {
   }
 }
 
+function evaluationVerdict(score) {
+  if (score >= 86) return "Strong fit";
+  if (score >= 74) return "Good fit";
+  if (score >= 58) return "Check fit";
+  return "Weak fit";
+}
+
+function localInfluencerEvaluation(input, influencer, index = 0) {
+  const relevance = candidateRelevanceScore(input.product, influencer);
+  const sourceBonus = influencer.sourceType === "profile" ? 10 : influencer.sourceType === "post" ? 8 : influencer.sourceType === "searchResult" ? 3 : 0;
+  const confidenceBonus = influencer.confidence === "High" ? 10 : influencer.confidence === "Medium" ? 5 : 0;
+  const riskPenalty = realSourceRiskPenalty(influencer);
+  const score = Math.min(94, Math.max(42, 58 + relevance * 4 + sourceBonus + confidenceBonus - riskPenalty - index));
+  const verdict = evaluationVerdict(score);
+  const product = input.product || "the product";
+  return {
+    displayName: influencer.displayName,
+    sourceUrl: influencer.sourceUrl,
+    aiScore: Math.round(score),
+    verdict,
+    summary: `${influencer.displayName} has visible public source evidence connected to ${product}. Treat the score as source-based until full creator analytics are verified.`,
+    strengths: [
+      influencer.matchReason || `Visible source text connects this creator result to ${product}.`,
+      `${influencer.platform} source context can support a native ${input.goal || "campaign"} test.`
+    ],
+    risks: [
+      influencer.sourceType === "article" ? "Article/list evidence is weaker than a direct creator profile or post." : "Verify the linked profile, rates, audience fit, and availability before outreach.",
+      "No private audience analytics, emails, or conversion data were inferred."
+    ],
+    recommendedUse: `Use for a source-backed ${input.goal || "creator"} shortlist pass; reference the linked public evidence in outreach.`,
+    confidence: influencer.confidence
+  };
+}
+
+function realSourceRiskPenalty(influencer) {
+  if (influencer.confidence === "Low" || influencer.sourceType === "article") return 12;
+  if (influencer.sourceType === "searchResult") return 7;
+  return 0;
+}
+
+function normalizeInfluencerEvaluationOutput(value, input, influencers) {
+  const fallback = influencers.map((influencer, index) => localInfluencerEvaluation(input, influencer, index));
+  const rawEvaluations = Array.isArray(value?.evaluations) ? value.evaluations : [];
+  const byKey = new Map();
+  const byUrl = new Map();
+  for (const raw of rawEvaluations) {
+    const normalized = {
+      displayName: String(raw?.displayName || ""),
+      sourceUrl: String(raw?.sourceUrl || ""),
+      aiScore: Math.round(Number(raw?.aiScore ?? raw?.score ?? 0)),
+      verdict: String(raw?.verdict || ""),
+      summary: String(raw?.summary || ""),
+      strengths: Array.isArray(raw?.strengths) ? raw.strengths.map((item) => String(item)).filter(Boolean).slice(0, 3) : [],
+      risks: Array.isArray(raw?.risks) ? raw.risks.map((item) => String(item)).filter(Boolean).slice(0, 3) : [],
+      recommendedUse: String(raw?.recommendedUse || raw?.recommendation || ""),
+      confidence: String(raw?.confidence || "")
+    };
+    const key = `${normalized.sourceUrl}::${normalized.displayName}`.toLowerCase();
+    byKey.set(key, normalized);
+    if (normalized.sourceUrl) byUrl.set(normalized.sourceUrl.toLowerCase(), normalized);
+  }
+
+  return {
+    evaluations: fallback.map((fallbackItem) => {
+      const candidate =
+        byKey.get(`${fallbackItem.sourceUrl}::${fallbackItem.displayName}`.toLowerCase()) ||
+        byUrl.get(fallbackItem.sourceUrl.toLowerCase());
+      if (!candidate) return fallbackItem;
+      const boundedScore = Math.min(100, Math.max(0, candidate.aiScore || fallbackItem.aiScore));
+      return {
+        displayName: fallbackItem.displayName,
+        sourceUrl: fallbackItem.sourceUrl,
+        aiScore: boundedScore,
+        verdict: evaluationVerdict(boundedScore),
+        summary: candidate.summary || fallbackItem.summary,
+        strengths: candidate.strengths.length ? candidate.strengths : fallbackItem.strengths,
+        risks: candidate.risks.length ? candidate.risks : fallbackItem.risks,
+        recommendedUse: candidate.recommendedUse || fallbackItem.recommendedUse,
+        confidence: ["Low", "Medium", "High"].includes(candidate.confidence) ? candidate.confidence : fallbackItem.confidence
+      };
+    }),
+    note: String(value?.note || "Creator fit evaluated from supplied public source evidence.")
+  };
+}
+
+async function evaluateRealInfluencers(input) {
+  const influencers = input.influencers
+    .filter((influencer) => influencer.sourceUrl && displayNameLooksUsable(influencer.displayName) && candidateLooksLikeCreator(influencer))
+    .slice(0, 12);
+  const fallback = influencers.map((influencer, index) => localInfluencerEvaluation(input, influencer, index));
+  const provider = configuredAIProvider();
+  if (provider === "local" || !influencers.length) {
+    return {
+      evaluations: fallback,
+      usedOpenAIAgents: false,
+      model: configuredAIModel(),
+      note: provider === "local"
+        ? "No AI provider key is configured; returned source-based creator fit scores."
+        : "No eligible public creator candidates were available for AI evaluation."
+    };
+  }
+
+  try {
+    const payload = {
+      product: input.product,
+      goal: input.goal,
+      platform: input.platform,
+      audience: input.audience,
+      influencers: compactCandidatesForAI(influencers, 12),
+      scoringRules: [
+        "Reward direct visible product/category relevance.",
+        "Reward direct profile/post evidence over articles or generic search results.",
+        "Penalize marketplace, affiliate marketing education, seller tutorials, or non-creator pages.",
+        "Do not infer private audience analytics, follower counts, rates, emails, or conversion data."
+      ]
+    };
+    let usedModel = configuredAIModel();
+    const finalOutput =
+      provider === "google" || provider === "nvidia"
+        ? await (async () => {
+            const runStructured = provider === "google" ? runGoogleStructured : runNvidiaStructured;
+            const structuredResult = await runStructured(
+              JSON.stringify(payload),
+              [
+                "Schema: {\"evaluations\":[{\"displayName\":\"string\",\"sourceUrl\":\"string\",\"aiScore\":0,\"verdict\":\"Strong fit|Good fit|Check fit|Weak fit\",\"summary\":\"string\",\"strengths\":[\"string\"],\"risks\":[\"string\"],\"recommendedUse\":\"string\",\"confidence\":\"Low|Medium|High\"}],\"note\":\"string\"}",
+                "Evaluate each supplied influencer for brand/product fit using only the supplied public source fields. Return one evaluation per influencer, preserving displayName and sourceUrl exactly.",
+                `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
+              ].join("\n"),
+              {
+                timeoutMs: Number(process.env.NVIDIA_CREATOR_EVALUATION_TIMEOUT_MS || 75000),
+                attempts: Number(process.env.NVIDIA_CREATOR_EVALUATION_ATTEMPTS || 1),
+                maxTokens: 900
+              }
+            );
+            usedModel = structuredResult.model;
+            return structuredResult.output;
+          })()
+        : (await run(
+            realInfluencerEvaluationAgent,
+            JSON.stringify(payload),
+            { maxTurns: 3 }
+          )).finalOutput;
+
+    const normalized = normalizeInfluencerEvaluationOutput(finalOutput, input, influencers);
+    const parsed = RealInfluencerEvaluationOutput.safeParse(normalized);
+    if (!parsed.success) {
+      return {
+        evaluations: fallback,
+        usedOpenAIAgents: false,
+        model: usedModel,
+        note: `${configuredAIDisplayName()} ran, but evaluation validation failed; returned source-based creator fit scores.`
+      };
+    }
+
+    return {
+      evaluations: parsed.data.evaluations,
+      usedOpenAIAgents: true,
+      model: usedModel,
+      note: `${configuredAIDisplayName()} (${usedModel}) scored creator fit from supplied Bright Data source evidence.`
+    };
+  } catch (error) {
+    return {
+      evaluations: fallback,
+      usedOpenAIAgents: false,
+      model: configuredAIModel(),
+      note: friendlyAIUnavailableNote(error, "source-based creator fit scores")
+    };
+  }
+}
+
 async function discoverRealInfluencers(input) {
-  const platform = input.platform && input.platform !== "Any" ? input.platform : "Instagram TikTok YouTube";
-  const productPhrase = productDiscoveryPhrase(input.product);
-  const queries = [
-    `${productPhrase} ${platform} creator review shopping links`,
-    `${productPhrase} ${platform} "comment SHOP" creator`,
-    `${productPhrase} ${platform} influencer product review setup`
-  ];
+  const queries = discoveryQueries(input);
   const results = await Promise.all(queries.map((query) => requestBrightDataSerp(query).catch(() => ({ ok: false, sources: [] }))));
   const sources = [];
   const seen = new Set();
@@ -1473,6 +1755,30 @@ app.post("/api/creator-enrichment", async (request, response) => {
     enrichments,
     disclaimer:
       "Bright Data enrichment is public web discovery context. It is not verified social platform analytics, contact data, or campaign performance."
+  });
+});
+
+app.post("/api/evaluate-influencers", async (request, response) => {
+  const parsed = RealInfluencerEvaluationRequest.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({
+      error: "Provide product context and at least one source-backed influencer to evaluate."
+    });
+    return;
+  }
+
+  const input = parsed.data;
+  const result = await evaluateRealInfluencers(input);
+  response.json({
+    product: input.product,
+    openaiAgents: {
+      used: result.usedOpenAIAgents,
+      model: result.model,
+      note: result.note
+    },
+    evaluations: result.evaluations,
+    disclaimer:
+      "AI fit scores use only the supplied public Bright Data source evidence. Verify rates, audience analytics, rights, and availability before committing budget."
   });
 });
 

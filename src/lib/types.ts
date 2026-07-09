@@ -72,6 +72,29 @@ export type RealInfluencer = {
   matchScore: number;
 };
 
+export type InfluencerEvaluation = {
+  displayName: string;
+  sourceUrl: string;
+  aiScore: number;
+  verdict: "Strong fit" | "Good fit" | "Check fit" | "Weak fit";
+  summary: string;
+  strengths: string[];
+  risks: string[];
+  recommendedUse: string;
+  confidence: "Low" | "Medium" | "High";
+};
+
+export type InfluencerEvaluationResponse = {
+  product: string;
+  openaiAgents: {
+    used: boolean;
+    model: string;
+    note: string;
+  };
+  evaluations: InfluencerEvaluation[];
+  disclaimer: string;
+};
+
 export type RealInfluencerResponse = {
   product: string;
   brightData: {

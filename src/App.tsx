@@ -16,6 +16,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { readLocal, storageKeys, writeLocal } from "./lib/storage";
 import type {
   CampaignRisk,
+  InfluencerEvaluation,
+  InfluencerEvaluationResponse,
   IntegrationStatus,
   Platform,
   ProductIntelligence,
@@ -102,6 +104,10 @@ function sourceTypeOrder(value: RealInfluencer["sourceType"]) {
 
 function realInfluencerEvidenceLabel(value: RealInfluencer["sourceType"]) {
   return evidenceLabels[value];
+}
+
+function realInfluencerKey(value: { sourceUrl?: string; displayName?: string }) {
+  return `${value.sourceUrl || ""}::${value.displayName || ""}`.toLowerCase();
 }
 
 function realInfluencerRisk(influencer: RealInfluencer): CampaignRisk {
@@ -198,6 +204,9 @@ export default function App() {
   const [realInfluencersLoading, setRealInfluencersLoading] = useState(false);
   const [realInfluencersError, setRealInfluencersError] = useState("");
   const [realInfluencerMeta, setRealInfluencerMeta] = useState<RealInfluencerResponse | null>(null);
+  const [realInfluencerEvaluations, setRealInfluencerEvaluations] = useState<Record<string, InfluencerEvaluation>>({});
+  const [realInfluencerEvaluationsLoading, setRealInfluencerEvaluationsLoading] = useState(false);
+  const [realInfluencerEvaluationsError, setRealInfluencerEvaluationsError] = useState("");
   const [realOutreachInfluencer, setRealOutreachInfluencer] = useState<RealInfluencer | null>(null);
 
   useEffect(() => {
@@ -249,11 +258,44 @@ export default function App() {
     }
   };
 
+  const requestRealInfluencerEvaluations = async (nextSearch: SearchState, influencers: RealInfluencer[]) => {
+    if (!influencers.length) return;
+    setRealInfluencerEvaluationsLoading(true);
+    setRealInfluencerEvaluationsError("");
+    try {
+      const response = await fetch("/api/evaluate-influencers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product: nextSearch.product,
+          goal: nextSearch.goal,
+          platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
+          audience: nextSearch.audience,
+          influencers
+        })
+      });
+      if (!response.ok) throw new Error("AI influencer evaluation request failed.");
+      const data = (await response.json()) as InfluencerEvaluationResponse;
+      const nextEvaluations: Record<string, InfluencerEvaluation> = {};
+      for (const evaluation of data.evaluations) {
+        nextEvaluations[realInfluencerKey(evaluation)] = evaluation;
+      }
+      setRealInfluencerEvaluations(nextEvaluations);
+    } catch (error) {
+      setRealInfluencerEvaluationsError(error instanceof Error ? error.message : "AI influencer evaluation request failed.");
+    } finally {
+      setRealInfluencerEvaluationsLoading(false);
+    }
+  };
+
   const requestRealInfluencers = async (nextSearch: SearchState) => {
     setRealInfluencersLoading(true);
     setRealInfluencersError("");
     setRealInfluencers([]);
     setRealInfluencerMeta(null);
+    setRealInfluencerEvaluations({});
+    setRealInfluencerEvaluationsError("");
+    setRealInfluencerEvaluationsLoading(false);
     try {
       const response = await fetch("/api/real-influencers", {
         method: "POST",
@@ -269,6 +311,7 @@ export default function App() {
       const data = (await response.json()) as RealInfluencerResponse;
       setRealInfluencers(data.influencers);
       setRealInfluencerMeta(data);
+      void requestRealInfluencerEvaluations(nextSearch, data.influencers);
     } catch (error) {
       setRealInfluencersError(error instanceof Error ? error.message : "Real influencer discovery request failed.");
     } finally {
@@ -355,6 +398,9 @@ export default function App() {
             realInfluencersLoading={realInfluencersLoading}
             realInfluencersError={realInfluencersError}
             realInfluencerMeta={realInfluencerMeta}
+            realInfluencerEvaluations={realInfluencerEvaluations}
+            realInfluencerEvaluationsLoading={realInfluencerEvaluationsLoading}
+            realInfluencerEvaluationsError={realInfluencerEvaluationsError}
             refreshRealInfluencers={() => requestRealInfluencers(searchState)}
             openRealOutreach={(influencer) => setRealOutreachInfluencer(influencer)}
           />
@@ -536,6 +582,9 @@ function ResultsScreen({
   realInfluencersLoading,
   realInfluencersError,
   realInfluencerMeta,
+  realInfluencerEvaluations,
+  realInfluencerEvaluationsLoading,
+  realInfluencerEvaluationsError,
   refreshRealInfluencers,
   openRealOutreach
 }: {
@@ -564,6 +613,9 @@ function ResultsScreen({
   realInfluencersLoading: boolean;
   realInfluencersError: string;
   realInfluencerMeta: RealInfluencerResponse | null;
+  realInfluencerEvaluations: Record<string, InfluencerEvaluation>;
+  realInfluencerEvaluationsLoading: boolean;
+  realInfluencerEvaluationsError: string;
   refreshRealInfluencers: () => void;
   openRealOutreach: (influencer: RealInfluencer) => void;
 }) {
@@ -610,6 +662,14 @@ function ResultsScreen({
     { label: "Medium", value: "Medium", count: countMatching((influencer) => realInfluencerRisk(influencer) === "Medium") },
     { label: "High", value: "High", count: countMatching((influencer) => realInfluencerRisk(influencer) === "High") }
   ], [realInfluencers]);
+  const sortOptions = [
+    { label: "Best fit", value: "match", description: "Highest AI/source fit first" },
+    { label: "Lower cost", value: "cost", description: "Prioritize lighter creator spend" },
+    { label: "Lower risk", value: "risk", description: "Prioritize safer evidence" },
+    { label: "Stronger proof", value: "evidence", description: "Prioritize source quality" }
+  ];
+  const scoreForSort = (influencer: RealInfluencer) =>
+    realInfluencerEvaluations[realInfluencerKey(influencer)]?.aiScore ?? influencer.matchScore;
   const filteredRealInfluencers = realInfluencers
     .filter((influencer) => platformFilter === "Any" || influencer.platform === platformFilter)
     .filter((influencer) => realInfluencerMatchesIntent(influencer, product, intentFilter))
@@ -620,9 +680,9 @@ function ResultsScreen({
       if (sortMode === "cost") return realInfluencerCostRank(a) - realInfluencerCostRank(b);
       if (sortMode === "risk") return riskOrder(realInfluencerRisk(a)) - riskOrder(realInfluencerRisk(b));
       if (sortMode === "evidence") {
-        return confidenceOrder(a.confidence) - confidenceOrder(b.confidence) || sourceTypeOrder(a.sourceType) - sourceTypeOrder(b.sourceType) || b.matchScore - a.matchScore;
+        return confidenceOrder(a.confidence) - confidenceOrder(b.confidence) || sourceTypeOrder(a.sourceType) - sourceTypeOrder(b.sourceType) || scoreForSort(b) - scoreForSort(a);
       }
-      return b.matchScore - a.matchScore;
+      return scoreForSort(b) - scoreForSort(a);
     });
   const activeFilterLabels = [
     sortMode !== "match" ? `Sorted by ${sortMode === "cost" ? "lowest cost" : sortMode === "risk" ? "lowest risk" : "strongest evidence"}` : "",
@@ -633,7 +693,7 @@ function ResultsScreen({
     riskFilter !== "Any" ? `Risk: ${riskFilter}` : ""
   ].filter(Boolean);
   const hasActiveRealFilters = activeFilterLabels.length > 0;
-  const activeMenuFilterCount = [platformFilter, intentFilter, qualityFilter, costFilter, riskFilter].filter((value) => value !== "Any").length;
+  const activeMenuFilterCount = [platformFilter, intentFilter, qualityFilter, costFilter, riskFilter].filter((value) => value !== "Any").length + (sortMode === "match" ? 0 : 1);
   const resetRealFilters = () => {
     setSortMode("match");
     setRiskFilter("Any");
@@ -668,18 +728,6 @@ function ResultsScreen({
           </div>
           {validationError ? <p className="error-text mt-3">{validationError}</p> : null}
           <div className="toolbar-strip mt-5">
-            <FilterSelect
-              icon={<SlidersHorizontal className="h-4 w-4" />}
-              label="Prioritize"
-              value={sortMode}
-              options={[
-                { label: "Best match", value: "match" },
-                { label: "Lowest cost", value: "cost" },
-                { label: "Lowest risk", value: "risk" },
-                { label: "Strongest evidence", value: "evidence" }
-              ]}
-              onChange={(value) => setSortMode(value as RealSortMode)}
-            />
             <button className="secondary-button" type="button" onClick={refreshRealInfluencers} disabled={realInfluencersLoading}>
               {realInfluencersLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               Find real influencers
@@ -727,41 +775,48 @@ function ResultsScreen({
               </div>
               {filtersOpen ? (
                 <div id="creator-filter-menu" className="filter-menu-grid">
-                  <FilterSelect
-                  icon={<ExternalLink className="h-4 w-4" />}
-                  label="Platform"
-                  value={platformFilter}
-                  options={platformOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
-                  onChange={setPlatformFilter}
-                />
-                  <FilterSelect
-                  icon={<BarChart3 className="h-4 w-4" />}
-                  label="Buyer intent"
-                  value={intentFilter}
-                  options={intentOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
-                  onChange={(value) => setIntentFilter(value as RealIntentFilter)}
-                />
-                  <FilterSelect
-                  icon={<ShieldCheck className="h-4 w-4" />}
-                  label="Source quality"
-                  value={qualityFilter}
-                  options={qualityOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
-                  onChange={(value) => setQualityFilter(value as RealQualityFilter)}
-                />
-                  <FilterSelect
-                  icon={<CircleDollarSign className="h-4 w-4" />}
-                  label="Estimated cost"
-                  value={costFilter}
-                  options={costOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
-                  onChange={(value) => setCostFilter(value as RealCostFilter)}
-                />
-                  <FilterSelect
-                  icon={<AlertTriangle className="h-4 w-4" />}
-                  label="Campaign risk"
-                  value={riskFilter}
-                  options={riskOptions.map((option) => ({ label: `${option.label} (${option.count})`, value: option.value }))}
-                  onChange={(value) => setRiskFilter(value as CampaignRisk | "Any")}
-                />
+                  <FilterChipGroup
+                    icon={<SlidersHorizontal className="h-4 w-4" />}
+                    label="Priority"
+                    value={sortMode}
+                    options={sortOptions}
+                    onChange={(value) => setSortMode(value as RealSortMode)}
+                  />
+                  <FilterChipGroup
+                    icon={<ExternalLink className="h-4 w-4" />}
+                    label="Channel"
+                    value={platformFilter}
+                    options={platformOptions}
+                    onChange={setPlatformFilter}
+                  />
+                  <FilterChipGroup
+                    icon={<BarChart3 className="h-4 w-4" />}
+                    label="Buyer signal"
+                    value={intentFilter}
+                    options={intentOptions}
+                    onChange={(value) => setIntentFilter(value as RealIntentFilter)}
+                  />
+                  <FilterChipGroup
+                    icon={<ShieldCheck className="h-4 w-4" />}
+                    label="Evidence quality"
+                    value={qualityFilter}
+                    options={qualityOptions}
+                    onChange={(value) => setQualityFilter(value as RealQualityFilter)}
+                  />
+                  <FilterChipGroup
+                    icon={<CircleDollarSign className="h-4 w-4" />}
+                    label="Budget band"
+                    value={costFilter}
+                    options={costOptions}
+                    onChange={(value) => setCostFilter(value as RealCostFilter)}
+                  />
+                  <FilterChipGroup
+                    icon={<AlertTriangle className="h-4 w-4" />}
+                    label="Campaign risk"
+                    value={riskFilter}
+                    options={riskOptions}
+                    onChange={(value) => setRiskFilter(value as CampaignRisk | "Any")}
+                  />
                 </div>
               ) : null}
               {activeFilterLabels.length ? (
@@ -811,13 +866,20 @@ function ResultsScreen({
 
         {!realInfluencersLoading && showRealResults ? (
           <>
-            <RealResultsBanner meta={realInfluencerMeta} />
+            <RealResultsBanner
+              meta={realInfluencerMeta}
+              evaluationCount={Object.keys(realInfluencerEvaluations).length}
+              evaluationLoading={realInfluencerEvaluationsLoading}
+              evaluationError={realInfluencerEvaluationsError}
+            />
             {filteredRealInfluencers.length ? (
               filteredRealInfluencers.map((influencer) => (
                 <RealInfluencerCard
                   key={`${influencer.sourceUrl}-${influencer.displayName}`}
                   influencer={influencer}
                   product={product}
+                  evaluation={realInfluencerEvaluations[realInfluencerKey(influencer)]}
+                  evaluationLoading={realInfluencerEvaluationsLoading}
                   openRealOutreach={openRealOutreach}
                 />
               ))
@@ -842,19 +904,47 @@ function ResultsScreen({
   );
 }
 
-function RealResultsBanner({ meta }: { meta: RealInfluencerResponse | null }) {
+function realResultsCaveat(meta: RealInfluencerResponse | null) {
+  if (!meta?.caveat) return "";
+  if (/REAL_INFLUENCER_AI_MODE|fast mode|rules-based/i.test(meta.caveat)) {
+    return "Creator candidates load from public source text first; review the linked evidence before outreach.";
+  }
+  return meta.caveat;
+}
+
+function RealResultsBanner({
+  meta,
+  evaluationCount,
+  evaluationLoading,
+  evaluationError
+}: {
+  meta: RealInfluencerResponse | null;
+  evaluationCount: number;
+  evaluationLoading: boolean;
+  evaluationError: string;
+}) {
+  const caveat = realResultsCaveat(meta);
+  const evaluationLabel = evaluationLoading
+    ? "AI scoring creators"
+    : evaluationCount
+      ? "AI evaluated cards"
+      : "Source-scored cards";
   return (
     <div className="rounded-lg border border-signal-100 bg-signal-50 p-4 text-sm text-signal-900">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="font-semibold">Real public influencer results</p>
           <p className="mt-1 text-signal-700">
-            Bright Data discovered {meta?.brightData.sourceCount ?? 0} public source results. The configured AI provider structured source-backed candidates.
+            Bright Data discovered {meta?.brightData.sourceCount ?? 0} public source results. Cards load fast from public evidence, then AI scores creator fit and campaign risk.
           </p>
         </div>
-        <span className="live-pill live-pill-agent">{meta?.openaiAgents.used ? "AI structured" : "Rules-based extraction"}</span>
+        <div className="flex flex-wrap gap-2">
+          <span className="live-pill live-pill-agent">{meta?.openaiAgents.used ? "AI curated sources" : "Bright Data first pass"}</span>
+          <span className="live-pill live-pill-agent">{evaluationLabel}</span>
+        </div>
       </div>
-      {meta?.caveat ? <p className="mt-3 text-xs leading-5 text-signal-700">{meta.caveat}</p> : null}
+      {caveat ? <p className="mt-3 text-xs leading-5 text-signal-700">{caveat}</p> : null}
+      {evaluationError ? <p className="mt-3 text-xs leading-5 text-caution">{evaluationError}</p> : null}
       <p className="mt-3 text-xs leading-5 text-signal-700">
         {meta?.disclaimer || "Displayed names and handles come from public search results. No private analytics or contact data is inferred."}
       </p>
@@ -918,13 +1008,19 @@ function LocalWorkflowRemoved({ navigate }: { navigate: (path: string) => void }
 function RealInfluencerCard({
   influencer,
   product,
+  evaluation,
+  evaluationLoading,
   openRealOutreach
 }: {
   influencer: RealInfluencer;
   product: string;
+  evaluation?: InfluencerEvaluation;
+  evaluationLoading: boolean;
   openRealOutreach: (influencer: RealInfluencer) => void;
 }) {
   const buyerSignals = realInfluencerBuyerSignals(influencer, product);
+  const displayScore = evaluation?.aiScore ?? influencer.matchScore;
+  const scoreLabel = evaluation ? "AI fit score" : evaluationLoading ? "AI scoring" : "Source score";
   return (
     <article className="creator-card">
       <div className="creator-card-header">
@@ -942,8 +1038,8 @@ function RealInfluencerCard({
           </div>
         </div>
         <div className="score-box score-box-compact">
-          <span>{influencer.matchScore}</span>
-          <small>Source match score</small>
+          <span>{evaluationLoading && !evaluation ? "..." : displayScore}</span>
+          <small>{scoreLabel}</small>
         </div>
       </div>
 
@@ -957,6 +1053,38 @@ function RealInfluencerCard({
       <div className="why-box">
         <h3>Why this result matches</h3>
         <p>{influencer.matchReason}</p>
+      </div>
+
+      <div className={`ai-evaluation ${evaluation ? "" : "ai-evaluation-pending"}`}>
+        <div className="ai-evaluation-header">
+          <div>
+            <p className="eyebrow">AI fit evaluation</p>
+            <h3>{evaluation?.verdict || (evaluationLoading ? "Scoring creator fit" : "Source score only")}</h3>
+          </div>
+          <span className="live-pill live-pill-agent">
+            {evaluation ? `${evaluation.confidence} confidence` : evaluationLoading ? "NIM running" : "Pending"}
+          </span>
+        </div>
+        {evaluation ? (
+          <>
+            <p className="mt-3 text-sm leading-6 text-muted">{evaluation.summary}</p>
+            <div className="ai-evaluation-grid">
+              <MiniList title="Strengths" items={evaluation.strengths.slice(0, 3)} />
+              <MiniList title="Watchouts" items={evaluation.risks.slice(0, 3)} />
+            </div>
+            <p className="ai-recommendation">{evaluation.recommendedUse}</p>
+          </>
+        ) : evaluationLoading ? (
+          <div className="mt-4 space-y-3" aria-live="polite">
+            <div className="skeleton h-4 w-4/5" />
+            <div className="skeleton h-4 w-full" />
+            <div className="skeleton h-4 w-2/3" />
+          </div>
+        ) : (
+          <p className="mt-3 text-sm leading-6 text-muted">
+            This card is currently ranked by visible source evidence only.
+          </p>
+        )}
       </div>
 
       <div className="live-enrichment">
@@ -1236,7 +1364,7 @@ function SegmentedControl({
   );
 }
 
-function FilterSelect({
+function FilterChipGroup({
   icon,
   label,
   value,
@@ -1246,21 +1374,36 @@ function FilterSelect({
   icon: React.ReactNode;
   label: string;
   value: string;
-  options: Array<{ label: string; value: string }>;
+  options: Array<{ label: string; value: string; count?: number; description?: string }>;
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="filter-select">
-      {icon}
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
+    <fieldset className="filter-chip-group">
+      <legend>
+        {icon}
+        <span>{label}</span>
+      </legend>
+      <div className="filter-chip-row">
+        {options.map((option) => {
+          const active = value === option.value;
+          const disabled = typeof option.count === "number" && option.count === 0 && !active;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              className={`filter-chip ${active ? "filter-chip-active" : ""}`}
+              aria-pressed={active}
+              disabled={disabled}
+              onClick={() => onChange(option.value)}
+            >
+              <span>{option.label}</span>
+              {typeof option.count === "number" ? <strong>{option.count}</strong> : null}
+              {option.description ? <small>{option.description}</small> : null}
+            </button>
+          );
+        })}
+      </div>
+    </fieldset>
   );
 }
 

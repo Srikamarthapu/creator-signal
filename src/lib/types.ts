@@ -82,6 +82,7 @@ export type InfluencerEvaluation = {
   risks: string[];
   recommendedUse: string;
   confidence: "Low" | "Medium" | "High";
+  scoringMethod: "ai" | "source";
 };
 
 export type InfluencerEvaluationResponse = {

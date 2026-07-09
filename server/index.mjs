@@ -95,7 +95,8 @@ const RealInfluencerEvaluationItem = z.object({
   strengths: z.array(z.string()).min(1).max(3),
   risks: z.array(z.string()).min(1).max(3),
   recommendedUse: z.string(),
-  confidence: z.enum(["Low", "Medium", "High"])
+  confidence: z.enum(["Low", "Medium", "High"]),
+  scoringMethod: z.enum(["ai", "source"])
 });
 
 const RealInfluencerEvaluationOutput = z.object({
@@ -1123,7 +1124,8 @@ function localInfluencerEvaluation(input, influencer, index = 0) {
       "No private audience analytics, emails, or conversion data were inferred."
     ],
     recommendedUse: `Use for a source-backed ${input.goal || "creator"} shortlist pass; reference the linked public evidence in outreach.`,
-    confidence: influencer.confidence
+    confidence: influencer.confidence,
+    scoringMethod: "source"
   };
 }
 
@@ -1148,7 +1150,8 @@ function normalizeInfluencerEvaluationOutput(value, input, influencers) {
       strengths: Array.isArray(raw?.strengths) ? raw.strengths.map((item) => String(item)).filter(Boolean).slice(0, 3) : [],
       risks: Array.isArray(raw?.risks) ? raw.risks.map((item) => String(item)).filter(Boolean).slice(0, 3) : [],
       recommendedUse: String(raw?.recommendedUse || raw?.recommendation || ""),
-      confidence: String(raw?.confidence || "")
+      confidence: String(raw?.confidence || ""),
+      scoringMethod: "ai"
     };
     const key = `${normalized.sourceUrl}::${normalized.displayName}`.toLowerCase();
     byKey.set(key, normalized);
@@ -1171,10 +1174,81 @@ function normalizeInfluencerEvaluationOutput(value, input, influencers) {
         strengths: candidate.strengths.length ? candidate.strengths : fallbackItem.strengths,
         risks: candidate.risks.length ? candidate.risks : fallbackItem.risks,
         recommendedUse: candidate.recommendedUse || fallbackItem.recommendedUse,
-        confidence: ["Low", "Medium", "High"].includes(candidate.confidence) ? candidate.confidence : fallbackItem.confidence
+        confidence: ["Low", "Medium", "High"].includes(candidate.confidence) ? candidate.confidence : fallbackItem.confidence,
+        scoringMethod: candidate.scoringMethod
       };
     }),
     note: String(value?.note || "Creator fit evaluated from supplied public source evidence.")
+  };
+}
+
+function evaluationKey(item) {
+  return `${item.sourceUrl || ""}::${item.displayName || ""}`.toLowerCase();
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function runInfluencerEvaluationChunk(input, influencers, provider, batchIndex, batchCount) {
+  const payload = {
+    product: input.product,
+    goal: input.goal,
+    platform: input.platform,
+    audience: input.audience,
+    batch: `${batchIndex + 1} of ${batchCount}`,
+    influencers: compactCandidatesForAI(influencers, influencers.length),
+    scoringRules: [
+      "Reward direct visible product/category relevance.",
+      "Reward direct profile/post evidence over articles or generic search results.",
+      "Penalize marketplace, affiliate marketing education, seller tutorials, or non-creator pages.",
+      "Do not infer private analytics, follower counts, rates, emails, or conversion data."
+    ]
+  };
+  let usedModel = configuredAIModel();
+  const finalOutput =
+    provider === "google" || provider === "nvidia"
+      ? await (async () => {
+          const runStructured = provider === "google" ? runGoogleStructured : runNvidiaStructured;
+          const structuredResult = await runStructured(
+            JSON.stringify(payload),
+            [
+              "Schema: {\"evaluations\":[{\"displayName\":\"string\",\"sourceUrl\":\"string\",\"aiScore\":0,\"verdict\":\"Strong fit|Good fit|Check fit|Weak fit\",\"summary\":\"string\",\"strengths\":[\"string\"],\"risks\":[\"string\"],\"recommendedUse\":\"string\",\"confidence\":\"Low|Medium|High\"}],\"note\":\"string\"}",
+              "Evaluate every supplied influencer for product fit using only the supplied public source fields. Preserve displayName and sourceUrl exactly. Keep summary, strengths, risks, and recommendedUse short.",
+              `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
+            ].join("\n"),
+            {
+              timeoutMs: Number(process.env.NVIDIA_CREATOR_EVALUATION_TIMEOUT_MS || 90000),
+              attempts: Number(process.env.NVIDIA_CREATOR_EVALUATION_ATTEMPTS || 1),
+              maxTokens: Number(process.env.NVIDIA_CREATOR_EVALUATION_MAX_TOKENS || 650)
+            }
+          );
+          usedModel = structuredResult.model;
+          return structuredResult.output;
+        })()
+      : (await run(
+          realInfluencerEvaluationAgent,
+          JSON.stringify(payload),
+          { maxTurns: 3 }
+        )).finalOutput;
+
+  const normalized = normalizeInfluencerEvaluationOutput(finalOutput, input, influencers);
+  const parsed = RealInfluencerEvaluationOutput.safeParse(normalized);
+  if (!parsed.success) {
+    throw new Error(`${configuredAIDisplayName()} evaluation validation failed.`);
+  }
+
+  return {
+    evaluations: parsed.data.evaluations.map((evaluation) => ({
+      ...evaluation,
+      scoringMethod: "ai"
+    })),
+    model: usedModel,
+    note: parsed.data.note
   };
 }
 
@@ -1196,62 +1270,60 @@ async function evaluateRealInfluencers(input) {
   }
 
   try {
-    const payload = {
-      product: input.product,
-      goal: input.goal,
-      platform: input.platform,
-      audience: input.audience,
-      influencers: compactCandidatesForAI(influencers, 12),
-      scoringRules: [
-        "Reward direct visible product/category relevance.",
-        "Reward direct profile/post evidence over articles or generic search results.",
-        "Penalize marketplace, affiliate marketing education, seller tutorials, or non-creator pages.",
-        "Do not infer private audience analytics, follower counts, rates, emails, or conversion data."
-      ]
-    };
-    let usedModel = configuredAIModel();
-    const finalOutput =
-      provider === "google" || provider === "nvidia"
-        ? await (async () => {
-            const runStructured = provider === "google" ? runGoogleStructured : runNvidiaStructured;
-            const structuredResult = await runStructured(
-              JSON.stringify(payload),
-              [
-                "Schema: {\"evaluations\":[{\"displayName\":\"string\",\"sourceUrl\":\"string\",\"aiScore\":0,\"verdict\":\"Strong fit|Good fit|Check fit|Weak fit\",\"summary\":\"string\",\"strengths\":[\"string\"],\"risks\":[\"string\"],\"recommendedUse\":\"string\",\"confidence\":\"Low|Medium|High\"}],\"note\":\"string\"}",
-                "Evaluate each supplied influencer for brand/product fit using only the supplied public source fields. Return one evaluation per influencer, preserving displayName and sourceUrl exactly.",
-                `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
-              ].join("\n"),
-              {
-                timeoutMs: Number(process.env.NVIDIA_CREATOR_EVALUATION_TIMEOUT_MS || 75000),
-                attempts: Number(process.env.NVIDIA_CREATOR_EVALUATION_ATTEMPTS || 1),
-                maxTokens: 900
-              }
-            );
-            usedModel = structuredResult.model;
-            return structuredResult.output;
-          })()
-        : (await run(
-            realInfluencerEvaluationAgent,
-            JSON.stringify(payload),
-            { maxTurns: 3 }
-          )).finalOutput;
+    const batchSize = Math.max(1, Math.min(5, Number(process.env.NVIDIA_CREATOR_EVALUATION_BATCH_SIZE || 3)));
+    const batches = provider === "openai" ? [influencers] : chunkItems(influencers, batchSize);
+    const settled = await Promise.allSettled(
+      batches.map((batch, batchIndex) => runInfluencerEvaluationChunk(input, batch, provider, batchIndex, batches.length))
+    );
+    const aiEvaluationMap = new Map();
+    const usedModels = new Set();
+    const failures = [];
 
-    const normalized = normalizeInfluencerEvaluationOutput(finalOutput, input, influencers);
-    const parsed = RealInfluencerEvaluationOutput.safeParse(normalized);
-    if (!parsed.success) {
+    for (const [index, result] of settled.entries()) {
+      if (result.status === "fulfilled") {
+        usedModels.add(result.value.model);
+        for (const evaluation of result.value.evaluations) {
+          aiEvaluationMap.set(evaluationKey(evaluation), evaluation);
+        }
+      } else {
+        failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason || "AI evaluation batch failed."));
+        const retryDelayMs = Math.max(0, Number(process.env.NVIDIA_CREATOR_EVALUATION_RETRY_DELAY_MS || 2500));
+        for (const influencer of batches[index]) {
+          if (retryDelayMs) await sleep(retryDelayMs);
+          try {
+            const retryResult = await runInfluencerEvaluationChunk(input, [influencer], provider, 0, 1);
+            usedModels.add(retryResult.model);
+            for (const evaluation of retryResult.evaluations) {
+              aiEvaluationMap.set(evaluationKey(evaluation), evaluation);
+            }
+          } catch (retryError) {
+            failures.push(retryError instanceof Error ? retryError.message : String(retryError || "AI single-card retry failed."));
+          }
+        }
+      }
+    }
+
+    const evaluations = fallback.map((fallbackItem) => aiEvaluationMap.get(evaluationKey(fallbackItem)) || fallbackItem);
+    const aiCount = evaluations.filter((evaluation) => evaluation.scoringMethod === "ai").length;
+
+    if (!aiCount) {
       return {
         evaluations: fallback,
         usedOpenAIAgents: false,
-        model: usedModel,
-        note: `${configuredAIDisplayName()} ran, but evaluation validation failed; returned source-based creator fit scores.`
+        model: configuredAIModel(),
+        note: failures.length
+          ? friendlyAIUnavailableNote(new Error(failures.join(" | ")), "source-based creator fit scores")
+          : `${configuredAIDisplayName()} ran, but no AI evaluations were returned; returned source-based creator fit scores.`
       };
     }
 
     return {
-      evaluations: parsed.data.evaluations,
+      evaluations,
       usedOpenAIAgents: true,
-      model: usedModel,
-      note: `${configuredAIDisplayName()} (${usedModel}) scored creator fit from supplied Bright Data source evidence.`
+      model: [...usedModels].join(", ") || configuredAIModel(),
+      note: failures.length
+        ? `${configuredAIDisplayName()} scored ${aiCount} of ${evaluations.length} creator cards; source scoring filled the rest.`
+        : `${configuredAIDisplayName()} (${[...usedModels].join(", ") || configuredAIModel()}) scored all ${evaluations.length} creator cards from supplied Bright Data source evidence.`
     };
   } catch (error) {
     return {

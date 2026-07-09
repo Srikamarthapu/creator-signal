@@ -694,6 +694,8 @@ function ResultsScreen({
   ].filter(Boolean);
   const hasActiveRealFilters = activeFilterLabels.length > 0;
   const activeMenuFilterCount = [platformFilter, intentFilter, qualityFilter, costFilter, riskFilter].filter((value) => value !== "Any").length + (sortMode === "match" ? 0 : 1);
+  const evaluationValues = Object.values(realInfluencerEvaluations);
+  const aiEvaluationCount = evaluationValues.filter((evaluation) => evaluation.scoringMethod === "ai").length;
   const resetRealFilters = () => {
     setSortMode("match");
     setRiskFilter("Any");
@@ -868,7 +870,8 @@ function ResultsScreen({
           <>
             <RealResultsBanner
               meta={realInfluencerMeta}
-              evaluationCount={Object.keys(realInfluencerEvaluations).length}
+              evaluationCount={evaluationValues.length}
+              aiEvaluationCount={aiEvaluationCount}
               evaluationLoading={realInfluencerEvaluationsLoading}
               evaluationError={realInfluencerEvaluationsError}
             />
@@ -915,19 +918,21 @@ function realResultsCaveat(meta: RealInfluencerResponse | null) {
 function RealResultsBanner({
   meta,
   evaluationCount,
+  aiEvaluationCount,
   evaluationLoading,
   evaluationError
 }: {
   meta: RealInfluencerResponse | null;
   evaluationCount: number;
+  aiEvaluationCount: number;
   evaluationLoading: boolean;
   evaluationError: string;
 }) {
   const caveat = realResultsCaveat(meta);
   const evaluationLabel = evaluationLoading
     ? "AI scoring creators"
-    : evaluationCount
-      ? "AI evaluated cards"
+    : aiEvaluationCount
+      ? `AI scored ${aiEvaluationCount}/${evaluationCount}`
       : "Source-scored cards";
   return (
     <div className="rounded-lg border border-signal-100 bg-signal-50 p-4 text-sm text-signal-900">
@@ -1020,7 +1025,8 @@ function RealInfluencerCard({
 }) {
   const buyerSignals = realInfluencerBuyerSignals(influencer, product);
   const displayScore = evaluation?.aiScore ?? influencer.matchScore;
-  const scoreLabel = evaluation ? "AI fit score" : evaluationLoading ? "AI scoring" : "Source score";
+  const isAIScored = evaluation?.scoringMethod === "ai";
+  const scoreLabel = isAIScored ? "AI fit score" : evaluationLoading ? "AI scoring" : "Source score";
   return (
     <article className="creator-card">
       <div className="creator-card-header">
@@ -1058,11 +1064,11 @@ function RealInfluencerCard({
       <div className={`ai-evaluation ${evaluation ? "" : "ai-evaluation-pending"}`}>
         <div className="ai-evaluation-header">
           <div>
-            <p className="eyebrow">AI fit evaluation</p>
+            <p className="eyebrow">{isAIScored || evaluationLoading ? "AI fit evaluation" : "Fit evaluation"}</p>
             <h3>{evaluation?.verdict || (evaluationLoading ? "Scoring creator fit" : "Source score only")}</h3>
           </div>
           <span className="live-pill live-pill-agent">
-            {evaluation ? `${evaluation.confidence} confidence` : evaluationLoading ? "NIM running" : "Pending"}
+            {evaluation ? `${isAIScored ? "NIM" : "Source"} / ${evaluation.confidence} confidence` : evaluationLoading ? "NIM running" : "Pending"}
           </span>
         </div>
         {evaluation ? (

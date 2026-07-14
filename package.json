@@ -9,10 +9,14 @@
     "server": "node server/index.mjs",
     "build": "tsc -b && vite build",
     "lint": "tsc -b --pretty false",
+    "test": "node --test server/*.test.mjs",
+    "test:db": "supabase test db",
+    "check": "pnpm test && pnpm build",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@openai/agents": "^0.13.0",
+    "@supabase/supabase-js": "2.110.3",
     "@vitejs/plugin-react": "^5.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.0",

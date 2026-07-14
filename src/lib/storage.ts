@@ -24,5 +24,10 @@ export const storageKeys = {
   lastSearch: "creator_signal_last_search",
   shortlist: "creator_signal_shortlist",
   campaigns: "creator_signal_campaigns",
-  drafts: "creator_signal_drafts"
+  drafts: "creator_signal_drafts",
+  agentThreadPrefix: "creator_signal_agent_thread"
 } as const;
+
+export function agentThreadStorageKey(sessionId: string) {
+  return `${storageKeys.agentThreadPrefix}:${sessionId}`;
+}

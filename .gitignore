@@ -6,4 +6,4 @@ dist
 tmp
 .DS_Store
 *.log
-
+graphify-out/

@@ -3,6 +3,52 @@ import dotenv from "dotenv";
 import express from "express";
 import { Agent, run } from "@openai/agents";
 import { z } from "zod";
+import {
+  ResearchSessionConflictError,
+  draftGroundedOutreach,
+  getResearchSessionSnapshot,
+  runGroundedCampaignAgent,
+  upsertResearchSession
+} from "./research-agent.mjs";
+import {
+  acceptWorkspaceInvitation,
+  authenticateRequest,
+  cancelAccountRequest,
+  createCampaignFromShortlist,
+  createCampaignTask,
+  createAccountRequest,
+  createWorkspaceInvitation,
+  finishProviderJob,
+  isPlatformOperator,
+  loadCampaignFromWorkspace,
+  loadSupportDashboard,
+  loadWorkspaceSettings,
+  loadShortlistFromWorkspace,
+  loadResearchFromWorkspace,
+  organizationEntitlementAccess,
+  previewWorkspaceInvitation,
+  removeWorkspaceMember,
+  requestOwnerKey,
+  persistAgentExchange,
+  persistResearchSnapshot,
+  revokeWorkspaceInvitation,
+  saveCreatorFromResearch,
+  setCampaignStatus,
+  setCampaignTaskStatus,
+  setShortlistEntryDecision,
+  startProviderJob,
+  transitionShortlist,
+  transitionOutreachDraft,
+  updateAccountProfile,
+  updateOrganizationEntitlement,
+  updateOutreachDraft,
+  updateWorkspaceMember,
+  userOrganizationRole,
+  userCanManageOrganization,
+  userCanAccessOrganization,
+  storeOutreachDraft,
+  workspaceIntegrationStatus
+} from "./supabase-workspace.mjs";
 
 dotenv.config({ path: ".env.local", quiet: true });
 dotenv.config({ quiet: true });
@@ -13,11 +59,33 @@ const port = Number(process.env.API_PORT || 8787);
 app.use(cors({ origin: ["http://127.0.0.1:5173", "http://localhost:5173"] }));
 app.use(express.json({ limit: "1mb" }));
 
+app.use("/api", async (request, response, next) => {
+  try {
+    request.creatorSignalAuth = await authenticateRequest(request);
+    const publicPath = request.path === "/health"
+      || request.path === "/integrations/status"
+      || /^\/invitations\/[A-Za-z0-9_-]{20,100}$/.test(request.path);
+    if (!publicPath && workspaceIntegrationStatus().authRequired && !request.creatorSignalAuth.user) {
+      response.status(401).json({ error: "Sign in to use creator research in this environment." });
+      return;
+    }
+    next();
+  } catch {
+    response.status(503).json({ error: "Account verification is temporarily unavailable." });
+  }
+});
+
 const ProductIntelligenceRequest = z.object({
   product: z.string().trim().min(1).max(140),
   goal: z.string().trim().max(60).optional(),
   platform: z.string().trim().max(40).optional(),
-  audience: z.string().trim().max(60).optional()
+  audience: z.string().trim().max(60).optional(),
+  budget: z.string().trim().max(60).optional()
+});
+
+const ResearchScopedProductRequest = ProductIntelligenceRequest.extend({
+  researchSessionId: z.string().uuid().optional(),
+  organizationId: z.string().uuid().optional()
 });
 
 const ProductBrief = z.object({
@@ -83,7 +151,103 @@ const RealInfluencerForEvaluation = RealInfluencerCandidate.extend({
 });
 
 const RealInfluencerEvaluationRequest = ProductIntelligenceRequest.extend({
+  researchSessionId: z.string().uuid().optional(),
+  organizationId: z.string().uuid().optional(),
   influencers: z.array(RealInfluencerForEvaluation).min(1).max(12)
+});
+
+const AgentChatRequest = z.object({
+  researchSessionId: z.string().uuid(),
+  organizationId: z.string().uuid().optional(),
+  messages: z.array(z.object({
+    id: z.string().uuid().optional(),
+    role: z.enum(["user", "assistant"]),
+    content: z.string().trim().min(1).max(2400)
+  })).min(1).max(20)
+});
+
+const SaveCreatorRequest = z.object({
+  organizationId: z.string().uuid(),
+  researchSessionId: z.string().uuid(),
+  sourceUrl: z.string().url().max(600)
+});
+
+const WorkspaceResourceRequest = z.object({
+  organizationId: z.string().uuid()
+});
+
+const ShortlistDecisionRequest = WorkspaceResourceRequest.extend({
+  decision: z.enum(["saved", "rejected", "restored", "archived"]),
+  reasons: z.array(z.string().trim().min(1).max(80)).max(4).default([]),
+  notes: z.string().trim().max(1000).optional()
+}).superRefine((value, context) => {
+  if (value.decision === "rejected" && !value.reasons.length) {
+    context.addIssue({ code: "custom", message: "Choose at least one rejection reason.", path: ["reasons"] });
+  }
+});
+
+const ShortlistTransitionRequest = WorkspaceResourceRequest.extend({
+  status: z.enum(["draft", "review", "approved", "archived"])
+});
+
+const CampaignFromShortlistRequest = WorkspaceResourceRequest.extend({
+  name: z.string().trim().min(1).max(160),
+  creatorBudgetCents: z.number().int().min(0).max(1_000_000_000_00).nullable().optional(),
+  startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+});
+
+const CampaignStatusRequest = WorkspaceResourceRequest.extend({
+  status: z.enum(["draft", "sourcing", "outreach", "negotiation", "contracted", "active", "review", "complete", "cancelled"])
+});
+
+const CampaignTaskRequest = WorkspaceResourceRequest.extend({
+  title: z.string().trim().min(1).max(240),
+  dueAt: z.string().datetime({ offset: true }).nullable().optional()
+});
+
+const CampaignTaskStatusRequest = WorkspaceResourceRequest.extend({
+  status: z.enum(["open", "in_progress", "blocked", "done", "cancelled"])
+});
+
+const OutreachDraftGenerateRequest = WorkspaceResourceRequest.extend({
+  creatorId: z.string().uuid()
+});
+
+const OutreachDraftUpdateRequest = WorkspaceResourceRequest.extend({
+  subject: z.string().trim().max(160).optional(),
+  body: z.string().trim().min(1).max(6000)
+});
+
+const OutreachDraftTransitionRequest = WorkspaceResourceRequest.extend({
+  status: z.enum(["draft", "review", "approved", "rejected"])
+});
+
+const WorkspaceInvitationRequest = WorkspaceResourceRequest.extend({
+  email: z.string().trim().email().max(240),
+  role: z.enum(["admin", "marketer", "approver", "analyst"])
+});
+
+const WorkspaceMemberRequest = WorkspaceResourceRequest.extend({
+  role: z.enum(["owner", "admin", "marketer", "approver", "analyst"]),
+  status: z.enum(["active", "suspended"])
+});
+
+const AccountRequestInput = z.object({
+  requestType: z.enum(["export", "deletion"])
+});
+
+const AccountProfileInput = z.object({
+  displayName: z.string().trim().min(1).max(120),
+  accountType: z.enum(["creator", "professional", "business"])
+});
+
+const EntitlementUpdateInput = z.object({
+  plan: z.enum(["pilot", "starter", "growth", "enterprise", "internal"]),
+  status: z.enum(["trialing", "active", "past_due", "suspended", "cancelled"]),
+  seatLimit: z.number().int().min(1).max(1000),
+  researchRunsLimit: z.number().int().min(0).max(1_000_000),
+  endsAt: z.string().datetime({ offset: true }).nullable().optional()
 });
 
 const RealInfluencerEvaluationItem = z.object({
@@ -1745,6 +1909,116 @@ async function enrichCreator(input, creator) {
   return enrichment;
 }
 
+const agentRateBuckets = new Map();
+
+function agentRequestAllowed(request, sessionId) {
+  const now = Date.now();
+  const windowMs = 60_000;
+  const limit = Math.max(5, Number(process.env.AGENT_CHAT_RATE_LIMIT_PER_MINUTE || 24));
+  const key = `${request.ip || request.socket?.remoteAddress || "local"}:${sessionId}`;
+  const bucket = agentRateBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    agentRateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (bucket.count >= limit) return false;
+  bucket.count += 1;
+  return true;
+}
+
+function updateResearchSession(response, payload) {
+  try {
+    return upsertResearchSession(payload);
+  } catch (error) {
+    if (error instanceof ResearchSessionConflictError) {
+      response.status(409).json({ error: error.message });
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function persistWorkspaceResearch(request, input, productBrief) {
+  if (!input.organizationId) return { saved: false, reason: "No organization selected." };
+  const user = request.creatorSignalAuth?.user;
+  if (!user) return { saved: false, reason: "Sign in to save this research." };
+  if (!workspaceIntegrationStatus().persistenceConfigured) return { saved: false, reason: "Supabase persistence is not connected." };
+  if (!await userCanManageOrganization(user.id, input.organizationId)) {
+    return { saved: false, reason: "This workspace role cannot save research." };
+  }
+  const snapshot = getResearchSessionSnapshot(input.researchSessionId, requestOwnerKey(request));
+  if (!snapshot) return { saved: false, reason: "The research session is no longer available." };
+  try {
+    const persisted = await persistResearchSnapshot({
+      userId: user.id,
+      organizationId: input.organizationId,
+      snapshot,
+      productBrief
+    });
+    return {
+      saved: true,
+      researchRunId: persisted.researchRunId,
+      creatorCount: persisted.creatorRecords.length,
+      evidenceCount: persisted.creatorRecords.length + persisted.productEvidenceIds.length
+    };
+  } catch (error) {
+    console.error("Workspace research persistence failed", error instanceof Error ? error.message : error);
+    return { saved: false, reason: "Research completed, but durable workspace save failed." };
+  }
+}
+
+async function requireWorkspaceProductAccess(request, response, organizationId, researchRunId) {
+  const integration = workspaceIntegrationStatus();
+  if (!integration.persistenceConfigured) return true;
+  if (!organizationId) {
+    if (integration.authRequired) {
+      response.status(400).json({ error: "Choose a workspace before using creator research." });
+      return false;
+    }
+    return true;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to use this workspace." });
+    return false;
+  }
+  try {
+    const access = await organizationEntitlementAccess({
+      organizationId,
+      userId: user.id,
+      researchRunId
+    });
+    if (!access.allowed) {
+      const status = /do not have access/i.test(access.reason) ? 403 : 402;
+      response.status(status).json({ error: access.reason, entitlement: access.entitlement });
+      return false;
+    }
+    request.creatorSignalEntitlement = access.entitlement;
+    return true;
+  } catch (error) {
+    console.error("Workspace entitlement check failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "Workspace access could not be verified right now." });
+    return false;
+  }
+}
+
+async function beginProviderDiagnostic(input) {
+  try {
+    return await startProviderJob(input);
+  } catch (error) {
+    console.error("Provider diagnostic start failed", error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+async function completeProviderDiagnostic(input) {
+  try {
+    await finishProviderJob(input);
+  } catch (error) {
+    console.error("Provider diagnostic completion failed", error instanceof Error ? error.message : error);
+  }
+}
+
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true, service: "creator-signal-api" });
 });
@@ -1762,12 +2036,23 @@ app.get("/api/integrations/status", (_request, response) => {
       model: configuredAIModel(),
       provider: configuredAIProvider(),
       displayName: configuredAIDisplayName()
+    },
+    campaignAgent: {
+      configured: hasNvidiaConfig(),
+      model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+      provider: "nvidia",
+      displayName: "GLM 5.2 via NVIDIA NIM",
+      grounding: "Bright Data research sessions"
+    },
+    workspace: {
+      ...workspaceIntegrationStatus(),
+      provider: "supabase"
     }
   });
 });
 
 app.post("/api/product-intelligence", async (request, response) => {
-  const parsed = ProductIntelligenceRequest.safeParse(request.body);
+  const parsed = ResearchScopedProductRequest.safeParse(request.body);
   if (!parsed.success) {
     response.status(400).json({
       error: "Enter a product or category to start."
@@ -1776,12 +2061,57 @@ app.post("/api/product-intelligence", async (request, response) => {
   }
 
   const input = parsed.data;
+  if (!await requireWorkspaceProductAccess(request, response, input.organizationId, input.researchSessionId)) return;
+  const brightDataJob = await beginProviderDiagnostic({
+    organizationId: input.organizationId,
+    userId: request.creatorSignalAuth?.user?.id,
+    researchRunId: input.researchSessionId,
+    provider: "bright_data",
+    operation: "product_research",
+    metadata: { product: input.product }
+  });
   const brightDataResult = await fetchBrightDataSerp(input).catch((error) => ({
     ok: false,
     sources: [],
     error: error instanceof Error ? error.message : "Bright Data request failed."
   }));
+  await completeProviderDiagnostic({
+    job: brightDataJob,
+    status: brightDataResult.ok ? "complete" : "degraded",
+    sourceCount: brightDataResult.sources.length,
+    errorCategory: brightDataResult.ok ? null : "provider_unavailable",
+    errorSummary: brightDataResult.error,
+    metadata: { researchSessionId: input.researchSessionId || null }
+  });
+  const aiProviderJob = configuredAIProvider() === "nvidia"
+    ? await beginProviderDiagnostic({
+        organizationId: input.organizationId,
+        userId: request.creatorSignalAuth?.user?.id,
+        researchRunId: input.researchSessionId,
+        provider: "nvidia",
+        operation: "product_brief",
+        model: configuredAIModel(),
+        metadata: { product: input.product }
+      })
+    : null;
   const agentResult = await buildAgentBrief(input, brightDataResult);
+  const agentHealthy = agentResult.usedOpenAIAgents && !/validation failed|unavailable|timed out/i.test(agentResult.agentNote);
+  await completeProviderDiagnostic({
+    job: aiProviderJob,
+    status: agentHealthy ? "complete" : "degraded",
+    sourceCount: brightDataResult.sources.length,
+    errorCategory: agentHealthy ? null : "model_fallback",
+    errorSummary: agentHealthy ? null : agentResult.agentNote,
+    metadata: { researchSessionId: input.researchSessionId || null }
+  });
+  const researchSession = updateResearchSession(response, {
+    id: input.researchSessionId,
+    ownerKey: requestOwnerKey(request),
+    input,
+    productSources: brightDataResult.sources
+  });
+  if (!researchSession) return;
+  const workspacePersistence = await persistWorkspaceResearch(request, { ...input, researchSessionId: researchSession.id }, agentResult.brief);
 
   response.json({
     product: input.product,
@@ -1796,6 +2126,8 @@ app.post("/api/product-intelligence", async (request, response) => {
       note: agentResult.agentNote
     },
     brief: agentResult.brief,
+    researchSession,
+    workspacePersistence,
     disclaimer:
       "Product research may come from live public web results. Verify creator-specific analytics, rates, and availability before committing budget."
   });
@@ -1840,7 +2172,25 @@ app.post("/api/evaluate-influencers", async (request, response) => {
   }
 
   const input = parsed.data;
+  if (!await requireWorkspaceProductAccess(request, response, input.organizationId, input.researchSessionId)) return;
+  const providerJob = await beginProviderDiagnostic({
+    organizationId: input.organizationId,
+    userId: request.creatorSignalAuth?.user?.id,
+    researchRunId: input.researchSessionId,
+    provider: "nvidia",
+    operation: "creator_evaluation",
+    model: configuredAIModel(),
+    metadata: { creatorCount: input.influencers.length }
+  });
   const result = await evaluateRealInfluencers(input);
+  await completeProviderDiagnostic({
+    job: providerJob,
+    status: result.usedOpenAIAgents ? "complete" : "degraded",
+    sourceCount: input.influencers.length,
+    errorCategory: result.usedOpenAIAgents ? null : "model_fallback",
+    errorSummary: result.usedOpenAIAgents ? null : result.note,
+    metadata: { evaluationCount: result.evaluations.length }
+  });
   response.json({
     product: input.product,
     openaiAgents: {
@@ -1855,7 +2205,7 @@ app.post("/api/evaluate-influencers", async (request, response) => {
 });
 
 app.post("/api/real-influencers", async (request, response) => {
-  const parsed = ProductIntelligenceRequest.safeParse(request.body);
+  const parsed = ResearchScopedProductRequest.safeParse(request.body);
   if (!parsed.success) {
     response.status(400).json({
       error: "Enter a product or category to start."
@@ -1864,7 +2214,37 @@ app.post("/api/real-influencers", async (request, response) => {
   }
 
   const input = parsed.data;
+  if (!await requireWorkspaceProductAccess(request, response, input.organizationId, input.researchSessionId)) return;
+  const providerJob = await beginProviderDiagnostic({
+    organizationId: input.organizationId,
+    userId: request.creatorSignalAuth?.user?.id,
+    researchRunId: input.researchSessionId,
+    provider: "bright_data",
+    operation: "creator_discovery",
+    metadata: { product: input.product, platform: input.platform || "Any" }
+  });
   const discovery = await discoverRealInfluencers(input);
+  const researchSession = updateResearchSession(response, {
+    id: input.researchSessionId,
+    ownerKey: requestOwnerKey(request),
+    input,
+    influencerSources: discovery.sources,
+    influencers: discovery.candidates
+  });
+  if (!researchSession) return;
+  const workspacePersistence = await persistWorkspaceResearch(request, { ...input, researchSessionId: researchSession.id });
+  await completeProviderDiagnostic({
+    job: providerJob,
+    status: discovery.brightDataUsed ? "complete" : "degraded",
+    sourceCount: discovery.sources.length,
+    errorCategory: discovery.brightDataUsed ? null : "provider_unavailable",
+    errorSummary: discovery.brightDataUsed ? null : discovery.caveat,
+    metadata: {
+      researchSessionId: researchSession.id,
+      creatorCount: discovery.candidates.length,
+      workspaceSaved: workspacePersistence.saved
+    }
+  });
   response.json({
     product: input.product,
     brightData: {
@@ -1877,10 +2257,989 @@ app.post("/api/real-influencers", async (request, response) => {
       model: configuredAIModel()
     },
     influencers: discovery.candidates,
+    researchSession,
+    workspacePersistence,
     caveat: discovery.caveat,
     disclaimer:
       "These are real public web results discovered via Bright Data. Metrics are shown only when visible in source text; no private analytics or contact data is inferred."
   });
+});
+
+app.post("/api/agent/chat", async (request, response) => {
+  const parsed = AgentChatRequest.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Send a message from an active creator research session." });
+    return;
+  }
+
+  if (!await requireWorkspaceProductAccess(
+    request,
+    response,
+    parsed.data.organizationId,
+    parsed.data.researchSessionId
+  )) return;
+
+  if (!agentRequestAllowed(request, parsed.data.researchSessionId)) {
+    response.status(429).json({ error: "The campaign copilot is receiving too many requests. Try again in a minute." });
+    return;
+  }
+
+  const providerJob = await beginProviderDiagnostic({
+    organizationId: parsed.data.organizationId,
+    userId: request.creatorSignalAuth?.user?.id,
+    researchRunId: parsed.data.researchSessionId,
+    provider: "nvidia",
+    operation: "campaign_agent_chat",
+    model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+    metadata: { messageCount: parsed.data.messages.length }
+  });
+
+  const result = await runGroundedCampaignAgent({
+    sessionId: parsed.data.researchSessionId,
+    ownerKey: requestOwnerKey(request),
+    messages: parsed.data.messages,
+    nvidia: {
+      apiKey: process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY,
+      baseUrl: process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1",
+      model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+      timeoutMs: Number(process.env.NVIDIA_AGENT_TIMEOUT_MS || 60000),
+      toolMaxTokens: Number(process.env.NVIDIA_AGENT_TOOL_MAX_TOKENS || 900),
+      answerMaxTokens: Number(process.env.NVIDIA_AGENT_ANSWER_MAX_TOKENS || 1000)
+    }
+  });
+
+  if (result.status === "missing") {
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: "failed",
+      sourceCount: 0,
+      errorCategory: "research_session_missing",
+      errorSummary: "The grounded research session was unavailable."
+    });
+    response.status(410).json({ error: "This research session expired. Run the creator search again to refresh its evidence." });
+    return;
+  }
+
+  let workspacePersistence = { saved: false, reason: "No organization selected." };
+  if (parsed.data.organizationId && request.creatorSignalAuth?.user && workspaceIntegrationStatus().persistenceConfigured) {
+    const canPersist = await userCanManageOrganization(request.creatorSignalAuth.user.id, parsed.data.organizationId);
+    const snapshot = canPersist
+      ? getResearchSessionSnapshot(parsed.data.researchSessionId, requestOwnerKey(request))
+      : null;
+    const userMessage = [...parsed.data.messages].reverse().find((message) => message.role === "user");
+    if (snapshot && userMessage) {
+      try {
+        const persisted = await persistAgentExchange({
+          userId: request.creatorSignalAuth.user.id,
+          organizationId: parsed.data.organizationId,
+          snapshot,
+          userMessage,
+          agentResult: result
+        });
+        workspacePersistence = { saved: true, ...persisted };
+      } catch (error) {
+        console.error("Campaign copilot persistence failed", error instanceof Error ? error.message : error);
+        workspacePersistence = { saved: false, reason: "The answer is available, but conversation save failed." };
+      }
+    }
+  }
+
+  await completeProviderDiagnostic({
+    job: providerJob,
+    status: result.providerUsed ? "complete" : "degraded",
+    sourceCount: result.citations?.length || 0,
+    errorCategory: result.providerUsed ? null : "model_fallback",
+    errorSummary: result.providerUsed ? null : result.note,
+    metadata: { toolsUsed: result.toolsUsed?.map((tool) => tool.name) || [] }
+  });
+
+  response.json({
+    ...result,
+    workspacePersistence,
+    grounded: true,
+    disclaimer: "Answers are restricted to the Bright Data public evidence displayed in this research session. Verify rates, availability, audience analytics, rights, and performance directly."
+  });
+});
+
+app.post("/api/workspace/shortlist", async (request, response) => {
+  const parsed = SaveCreatorRequest.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a source-backed creator from an active research session." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in before saving creators to a workspace." });
+    return;
+  }
+  if (!workspaceIntegrationStatus().persistenceConfigured) {
+    response.status(503).json({ error: "Supabase persistence is not connected in this environment." });
+    return;
+  }
+  const allowed = await userCanManageOrganization(user.id, parsed.data.organizationId);
+  if (!allowed) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  const snapshot = getResearchSessionSnapshot(parsed.data.researchSessionId, requestOwnerKey(request));
+  if (!snapshot) {
+    response.status(410).json({ error: "This research session expired. Run the creator search again before saving." });
+    return;
+  }
+  try {
+    const saved = await saveCreatorFromResearch({
+      userId: user.id,
+      organizationId: parsed.data.organizationId,
+      snapshot,
+      sourceUrl: parsed.data.sourceUrl
+    });
+    if (!saved) {
+      response.status(404).json({ error: "That creator is not part of this Bright Data research session." });
+      return;
+    }
+    response.json({ saved: true, ...saved });
+  } catch (error) {
+    console.error("Workspace shortlist persistence failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The creator could not be saved right now. No local placeholder was created." });
+  }
+});
+
+function sendWorkspaceWorkflowError(response, error, fallback) {
+  const rawMessage = error instanceof Error ? error.message : "";
+  const message = rawMessage.includes(": ") ? rawMessage.slice(rawMessage.indexOf(": ") + 2) : rawMessage;
+  if (/role is required|membership is required|sign in with|verified account|only an owner/i.test(message)) {
+    response.status(403).json({ error: message });
+    return;
+  }
+  if (/not found/i.test(message)) {
+    response.status(404).json({ error: message });
+    return;
+  }
+  if (/valid invitation email|valid workspace role|valid membership status|invalid/i.test(message)) {
+    response.status(400).json({ error: message });
+    return;
+  }
+  if (/approve|reopen|shortlist|campaign|creator|date|budget|reason|already|invitation|expired|pending|workspace access|account request/i.test(message)) {
+    response.status(409).json({ error: message });
+    return;
+  }
+  console.error(fallback, rawMessage || error);
+  response.status(503).json({ error: fallback });
+}
+
+app.get("/api/invitations/:token", async (request, response) => {
+  const parsed = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{20,100}$/) }).safeParse(request.params);
+  if (!parsed.success) {
+    response.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  try {
+    const invitation = await previewWorkspaceInvitation(parsed.data.token);
+    if (!invitation) {
+      response.status(404).json({ error: "Invitation not found." });
+      return;
+    }
+    response.json({ invitation });
+  } catch (error) {
+    console.error("Workspace invitation preview failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "This invitation cannot be checked right now." });
+  }
+});
+
+app.post("/api/invitations/:token/accept", async (request, response) => {
+  const parsed = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{20,100}$/) }).safeParse(request.params);
+  if (!parsed.success) {
+    response.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in with the invited email to join this workspace." });
+    return;
+  }
+  try {
+    const accepted = await acceptWorkspaceInvitation({ token: parsed.data.token, userId: user.id });
+    response.json({ accepted: true, ...accepted });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The workspace invitation could not be accepted.");
+  }
+});
+
+app.get("/api/workspace/settings", async (request, response) => {
+  const parsed = z.object({ organizationId: z.string().uuid() }).safeParse(request.query);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid workspace." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to open workspace settings." });
+    return;
+  }
+  try {
+    const settings = await loadWorkspaceSettings({
+      organizationId: parsed.data.organizationId,
+      userId: user.id
+    });
+    if (!settings) {
+      response.status(403).json({ error: "You do not have access to that workspace." });
+      return;
+    }
+    response.json(settings);
+  } catch (error) {
+    console.error("Workspace settings load failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "Workspace settings could not be loaded right now." });
+  }
+});
+
+app.post("/api/workspace/invitations", async (request, response) => {
+  const parsed = WorkspaceInvitationRequest.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: parsed.error.issues[0]?.message || "Enter a valid team invitation." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to invite a workspace member." });
+    return;
+  }
+  try {
+    const created = await createWorkspaceInvitation({
+      organizationId: parsed.data.organizationId,
+      userId: user.id,
+      email: parsed.data.email,
+      role: parsed.data.role,
+      appOrigin: process.env.APP_ORIGIN || "http://127.0.0.1:5173"
+    });
+    response.status(201).json({
+      ...created,
+      note: "Copy this link now. Only its secure hash is stored, and no email was sent automatically."
+    });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The team invitation could not be created.");
+  }
+});
+
+app.post("/api/workspace/invitations/:invitationId/revoke", async (request, response) => {
+  const parsed = WorkspaceResourceRequest.extend({ invitationId: z.string().uuid() }).safeParse({
+    ...request.body,
+    invitationId: request.params.invitationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid pending invitation." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to revoke a workspace invitation." });
+    return;
+  }
+  try {
+    await revokeWorkspaceInvitation({
+      organizationId: parsed.data.organizationId,
+      invitationId: parsed.data.invitationId,
+      userId: user.id
+    });
+    response.json({ revoked: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The invitation could not be revoked.");
+  }
+});
+
+app.patch("/api/workspace/members/:membershipId", async (request, response) => {
+  const parsed = WorkspaceMemberRequest.extend({ membershipId: z.string().uuid() }).safeParse({
+    ...request.body,
+    membershipId: request.params.membershipId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid member role and access state." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to manage workspace members." });
+    return;
+  }
+  try {
+    const membership = await updateWorkspaceMember({
+      organizationId: parsed.data.organizationId,
+      membershipId: parsed.data.membershipId,
+      userId: user.id,
+      role: parsed.data.role,
+      status: parsed.data.status
+    });
+    response.json({ saved: true, membership });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The member access could not be updated.");
+  }
+});
+
+app.delete("/api/workspace/members/:membershipId", async (request, response) => {
+  const parsed = WorkspaceResourceRequest.extend({ membershipId: z.string().uuid() }).safeParse({
+    ...request.body,
+    membershipId: request.params.membershipId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid workspace member." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to manage workspace members." });
+    return;
+  }
+  try {
+    await removeWorkspaceMember({
+      organizationId: parsed.data.organizationId,
+      membershipId: parsed.data.membershipId,
+      userId: user.id
+    });
+    response.json({ removed: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The workspace member could not be removed.");
+  }
+});
+
+app.patch("/api/account/profile", async (request, response) => {
+  const parsed = AccountProfileInput.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: parsed.error.issues[0]?.message || "Complete your account profile." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to update your account." });
+    return;
+  }
+  try {
+    const profile = await updateAccountProfile({ userId: user.id, ...parsed.data });
+    response.json({ saved: true, profile });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "Your account profile could not be updated.");
+  }
+});
+
+app.post("/api/account/requests", async (request, response) => {
+  const parsed = AccountRequestInput.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid account request." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to manage your account data." });
+    return;
+  }
+  try {
+    const accountRequest = await createAccountRequest({ userId: user.id, requestType: parsed.data.requestType });
+    response.status(201).json({ created: true, accountRequest });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The account request could not be created.");
+  }
+});
+
+app.post("/api/account/requests/:requestId/cancel", async (request, response) => {
+  const parsed = z.object({ requestId: z.string().uuid() }).safeParse(request.params);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid account request." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to manage your account data." });
+    return;
+  }
+  try {
+    await cancelAccountRequest({ userId: user.id, requestId: parsed.data.requestId });
+    response.json({ cancelled: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The account request could not be cancelled.");
+  }
+});
+
+app.get("/api/internal/support", async (request, response) => {
+  const parsed = z.object({
+    attentionOnly: z.enum(["true", "false"]).optional().transform((value) => value === "true")
+  }).safeParse(request.query);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid support health filter." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to open the support console." });
+    return;
+  }
+  try {
+    const dashboard = await loadSupportDashboard({
+      userId: user.id,
+      attentionOnly: parsed.data.attentionOnly
+    });
+    if (!dashboard) {
+      response.status(403).json({ error: "A platform operator role is required." });
+      return;
+    }
+    response.json(dashboard);
+  } catch (error) {
+    console.error("Support dashboard load failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The support console could not be loaded right now." });
+  }
+});
+
+app.patch("/api/internal/organizations/:organizationId/entitlement", async (request, response) => {
+  const resource = z.object({ organizationId: z.string().uuid() }).safeParse(request.params);
+  const input = EntitlementUpdateInput.safeParse(request.body);
+  if (!resource.success || !input.success) {
+    response.status(400).json({ error: input.success ? "Choose a valid workspace." : input.error.issues[0]?.message || "Enter valid workspace access limits." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to manage workspace access." });
+    return;
+  }
+  if (!await isPlatformOperator(user.id)) {
+    response.status(403).json({ error: "A platform operator role is required." });
+    return;
+  }
+  try {
+    const entitlement = await updateOrganizationEntitlement({
+      organizationId: resource.data.organizationId,
+      userId: user.id,
+      ...input.data
+    });
+    response.json({ saved: true, entitlement });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "Workspace access could not be updated.");
+  }
+});
+
+app.get("/api/workspace/shortlists/:shortlistId", async (request, response) => {
+  const parsed = z.object({
+    shortlistId: z.string().uuid(),
+    organizationId: z.string().uuid()
+  }).safeParse({
+    shortlistId: request.params.shortlistId,
+    organizationId: request.query.organizationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid shortlist." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to open this shortlist." });
+    return;
+  }
+  const role = await userOrganizationRole(user.id, parsed.data.organizationId);
+  if (!role) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  try {
+    const data = await loadShortlistFromWorkspace(parsed.data);
+    if (!data) {
+      response.status(404).json({ error: "That shortlist was not found." });
+      return;
+    }
+    response.json({
+      ...data,
+      permissions: {
+        role,
+        canManage: ["owner", "admin", "marketer"].includes(role),
+        canApprove: ["owner", "admin", "approver"].includes(role)
+      }
+    });
+  } catch (error) {
+    console.error("Workspace shortlist load failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The shortlist could not be loaded right now." });
+  }
+});
+
+app.patch("/api/workspace/shortlists/:shortlistId/entries/:entryId", async (request, response) => {
+  const bodyParsed = ShortlistDecisionRequest.safeParse(request.body);
+  const resourceParsed = z.object({
+    shortlistId: z.string().uuid(),
+    entryId: z.string().uuid()
+  }).safeParse({
+    shortlistId: request.params.shortlistId,
+    entryId: request.params.entryId
+  });
+  if (!bodyParsed.success || !resourceParsed.success) {
+    response.status(400).json({ error: bodyParsed.success ? "Choose a valid shortlist creator." : bodyParsed.error.issues[0]?.message || "Choose a valid creator decision." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to update this shortlist." });
+    return;
+  }
+  try {
+    await setShortlistEntryDecision({
+      organizationId: bodyParsed.data.organizationId,
+      shortlistId: resourceParsed.data.shortlistId,
+      entryId: resourceParsed.data.entryId,
+      userId: user.id,
+      decision: bodyParsed.data.decision,
+      reasons: bodyParsed.data.reasons,
+      notes: bodyParsed.data.notes
+    });
+    response.json({ saved: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The creator decision could not be saved.");
+  }
+});
+
+app.post("/api/workspace/shortlists/:shortlistId/transition", async (request, response) => {
+  const parsed = ShortlistTransitionRequest.extend({ shortlistId: z.string().uuid() }).safeParse({
+    ...request.body,
+    shortlistId: request.params.shortlistId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid shortlist status." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to update this shortlist." });
+    return;
+  }
+  try {
+    await transitionShortlist({
+      organizationId: parsed.data.organizationId,
+      shortlistId: parsed.data.shortlistId,
+      userId: user.id,
+      status: parsed.data.status
+    });
+    response.json({ saved: true, status: parsed.data.status });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The shortlist status could not be changed.");
+  }
+});
+
+app.post("/api/workspace/shortlists/:shortlistId/campaign", async (request, response) => {
+  const parsed = CampaignFromShortlistRequest.extend({ shortlistId: z.string().uuid() }).safeParse({
+    ...request.body,
+    shortlistId: request.params.shortlistId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: parsed.error.issues[0]?.message || "Complete the campaign setup." });
+    return;
+  }
+  if (parsed.data.startsOn && parsed.data.endsOn && parsed.data.endsOn < parsed.data.startsOn) {
+    response.status(400).json({ error: "Campaign end date must follow its start date." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to create a campaign." });
+    return;
+  }
+  try {
+    const campaignId = await createCampaignFromShortlist({
+      organizationId: parsed.data.organizationId,
+      shortlistId: parsed.data.shortlistId,
+      userId: user.id,
+      name: parsed.data.name,
+      creatorBudgetCents: parsed.data.creatorBudgetCents,
+      startsOn: parsed.data.startsOn,
+      endsOn: parsed.data.endsOn
+    });
+    response.json({ created: true, campaignId });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The campaign could not be created from this shortlist.");
+  }
+});
+
+app.get("/api/workspace/campaigns/:campaignId", async (request, response) => {
+  const parsed = z.object({
+    campaignId: z.string().uuid(),
+    organizationId: z.string().uuid()
+  }).safeParse({
+    campaignId: request.params.campaignId,
+    organizationId: request.query.organizationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid campaign." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to open this campaign." });
+    return;
+  }
+  const role = await userOrganizationRole(user.id, parsed.data.organizationId);
+  if (!role) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  try {
+    const data = await loadCampaignFromWorkspace(parsed.data);
+    if (!data) {
+      response.status(404).json({ error: "That campaign was not found." });
+      return;
+    }
+    response.json({
+      ...data,
+      permissions: {
+        role,
+        canManage: ["owner", "admin", "marketer"].includes(role),
+        canApprove: ["owner", "admin", "approver"].includes(role)
+      },
+      campaignAgent: {
+        configured: hasNvidiaConfig(),
+        model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2"
+      }
+    });
+  } catch (error) {
+    console.error("Workspace campaign load failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The campaign could not be loaded right now." });
+  }
+});
+
+app.post("/api/workspace/campaigns/:campaignId/status", async (request, response) => {
+  const parsed = CampaignStatusRequest.extend({ campaignId: z.string().uuid() }).safeParse({
+    ...request.body,
+    campaignId: request.params.campaignId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid campaign stage." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to update this campaign." });
+    return;
+  }
+  try {
+    await setCampaignStatus({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId,
+      userId: user.id,
+      status: parsed.data.status
+    });
+    response.json({ saved: true, status: parsed.data.status });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The campaign stage could not be changed.");
+  }
+});
+
+app.post("/api/workspace/campaigns/:campaignId/tasks", async (request, response) => {
+  const parsed = CampaignTaskRequest.extend({ campaignId: z.string().uuid() }).safeParse({
+    ...request.body,
+    campaignId: request.params.campaignId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: parsed.error.issues[0]?.message || "Enter a valid campaign task." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to create campaign tasks." });
+    return;
+  }
+  try {
+    await createCampaignTask({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId,
+      userId: user.id,
+      title: parsed.data.title,
+      dueAt: parsed.data.dueAt
+    });
+    response.status(201).json({ created: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The campaign task could not be created.");
+  }
+});
+
+app.patch("/api/workspace/campaigns/:campaignId/tasks/:taskId", async (request, response) => {
+  const parsed = CampaignTaskStatusRequest.extend({
+    campaignId: z.string().uuid(),
+    taskId: z.string().uuid()
+  }).safeParse({
+    ...request.body,
+    campaignId: request.params.campaignId,
+    taskId: request.params.taskId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid task status." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to update campaign tasks." });
+    return;
+  }
+  try {
+    await setCampaignTaskStatus({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId,
+      taskId: parsed.data.taskId,
+      userId: user.id,
+      status: parsed.data.status
+    });
+    response.json({ saved: true, status: parsed.data.status });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The campaign task could not be updated.");
+  }
+});
+
+app.post("/api/workspace/campaigns/:campaignId/outreach-drafts", async (request, response) => {
+  const parsed = OutreachDraftGenerateRequest.extend({ campaignId: z.string().uuid() }).safeParse({
+    ...request.body,
+    campaignId: request.params.campaignId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a source-backed creator for outreach." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to prepare outreach." });
+    return;
+  }
+  if (!await userCanManageOrganization(user.id, parsed.data.organizationId)) {
+    response.status(403).json({ error: "A workspace manager role is required." });
+    return;
+  }
+  let providerJob = null;
+  try {
+    const campaignData = await loadCampaignFromWorkspace({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId
+    });
+    const entry = campaignData?.shortlist?.entries.find((candidate) => (
+      candidate.creator?.id === parsed.data.creatorId && ["saved", "restored"].includes(candidate.decision)
+    ));
+    const researchRunId = campaignData?.shortlist?.shortlist.researchRunId;
+    if (!campaignData || !entry?.creator || !researchRunId) {
+      response.status(409).json({ error: "Outreach can only be drafted for an approved creator with saved Bright Data evidence." });
+      return;
+    }
+    if (!await requireWorkspaceProductAccess(request, response, parsed.data.organizationId, researchRunId)) return;
+    if (!agentRequestAllowed(request, `${researchRunId}:outreach`)) {
+      response.status(429).json({ error: "Outreach drafting is receiving too many requests. Try again in a minute." });
+      return;
+    }
+    const savedResearch = await loadResearchFromWorkspace({
+      organizationId: parsed.data.organizationId,
+      researchRunId
+    });
+    if (!savedResearch) {
+      response.status(409).json({ error: "The campaign's source research is no longer available." });
+      return;
+    }
+    providerJob = await beginProviderDiagnostic({
+      organizationId: parsed.data.organizationId,
+      userId: user.id,
+      researchRunId,
+      provider: "nvidia",
+      operation: "outreach_draft",
+      model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+      metadata: { campaignId: parsed.data.campaignId, creatorId: parsed.data.creatorId }
+    });
+    upsertResearchSession({
+      id: savedResearch.id,
+      ownerKey: requestOwnerKey(request),
+      input: savedResearch.input,
+      productSources: savedResearch.productSources,
+      influencers: savedResearch.influencers
+    });
+    const draft = await draftGroundedOutreach({
+      sessionId: savedResearch.id,
+      ownerKey: requestOwnerKey(request),
+      creator: entry.creator.displayName,
+      campaignName: campaignData.campaign.name,
+      nvidia: {
+        apiKey: process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY,
+        baseUrl: process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1",
+        model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+        timeoutMs: Number(process.env.NVIDIA_AGENT_TIMEOUT_MS || 60000),
+        toolMaxTokens: Number(process.env.NVIDIA_AGENT_TOOL_MAX_TOKENS || 900),
+        answerMaxTokens: Number(process.env.NVIDIA_AGENT_ANSWER_MAX_TOKENS || 1000)
+      }
+    });
+    if (draft.status !== "ok" || !draft.citations?.length) {
+      await completeProviderDiagnostic({
+        job: providerJob,
+        status: "degraded",
+        sourceCount: draft.citations?.length || 0,
+        errorCategory: "grounding_unavailable",
+        errorSummary: draft.note || "No valid saved evidence was available for this creator."
+      });
+      response.status(409).json({ error: "No valid saved evidence was available for this creator." });
+      return;
+    }
+    const sourceReferences = draft.citations.map((citation) => ({
+      id: citation.id,
+      title: citation.title,
+      url: citation.url,
+      excerpt: citation.excerpt,
+      creatorName: citation.creatorName,
+      provider: "bright_data"
+    }));
+    const savedDraft = await storeOutreachDraft({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId,
+      creatorId: parsed.data.creatorId,
+      userId: user.id,
+      subject: draft.subject,
+      body: draft.body,
+      sourceReferences
+    });
+    const savedRecord = Array.isArray(savedDraft) ? savedDraft[0] : savedDraft;
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: draft.providerUsed ? "complete" : "degraded",
+      sourceCount: draft.citations.length,
+      errorCategory: draft.providerUsed ? null : "model_fallback",
+      errorSummary: draft.providerUsed ? null : draft.note,
+      metadata: { campaignId: parsed.data.campaignId, draftId: savedRecord?.id || null }
+    });
+    response.status(201).json({
+      created: true,
+      draftId: savedRecord?.id,
+      subject: draft.subject,
+      body: draft.body,
+      sourceReferences,
+      providerUsed: draft.providerUsed,
+      model: draft.model,
+      note: draft.note,
+      grounded: true,
+      sent: false
+    });
+  } catch (error) {
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: "failed",
+      sourceCount: 0,
+      errorCategory: "request_failed",
+      errorSummary: error instanceof Error ? error.message : "Outreach drafting failed."
+    });
+    sendWorkspaceWorkflowError(response, error, "The source-grounded outreach draft could not be created.");
+  }
+});
+
+app.patch("/api/workspace/campaigns/:campaignId/outreach-drafts/:draftId", async (request, response) => {
+  const parsed = OutreachDraftUpdateRequest.extend({
+    campaignId: z.string().uuid(),
+    draftId: z.string().uuid()
+  }).safeParse({
+    ...request.body,
+    campaignId: request.params.campaignId,
+    draftId: request.params.draftId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: parsed.error.issues[0]?.message || "Enter a valid outreach draft." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to edit outreach." });
+    return;
+  }
+  try {
+    await updateOutreachDraft({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId,
+      draftId: parsed.data.draftId,
+      userId: user.id,
+      subject: parsed.data.subject,
+      body: parsed.data.body
+    });
+    response.json({ saved: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The outreach draft could not be edited.");
+  }
+});
+
+app.post("/api/workspace/campaigns/:campaignId/outreach-drafts/:draftId/transition", async (request, response) => {
+  const parsed = OutreachDraftTransitionRequest.extend({
+    campaignId: z.string().uuid(),
+    draftId: z.string().uuid()
+  }).safeParse({
+    ...request.body,
+    campaignId: request.params.campaignId,
+    draftId: request.params.draftId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid outreach approval status." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to review outreach." });
+    return;
+  }
+  try {
+    await transitionOutreachDraft({
+      organizationId: parsed.data.organizationId,
+      campaignId: parsed.data.campaignId,
+      draftId: parsed.data.draftId,
+      userId: user.id,
+      status: parsed.data.status
+    });
+    response.json({ saved: true, status: parsed.data.status });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The outreach approval status could not be changed.");
+  }
+});
+
+app.get("/api/workspace/research/:researchRunId", async (request, response) => {
+  const parsed = z.object({
+    researchRunId: z.string().uuid(),
+    organizationId: z.string().uuid()
+  }).safeParse({
+    researchRunId: request.params.researchRunId,
+    organizationId: request.query.organizationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid saved research session." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to resume saved research." });
+    return;
+  }
+  if (!workspaceIntegrationStatus().persistenceConfigured) {
+    response.status(503).json({ error: "Supabase persistence is not connected in this environment." });
+    return;
+  }
+  if (!await userCanAccessOrganization(user.id, parsed.data.organizationId)) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  try {
+    const saved = await loadResearchFromWorkspace({
+      organizationId: parsed.data.organizationId,
+      researchRunId: parsed.data.researchRunId
+    });
+    if (!saved) {
+      response.status(404).json({ error: "That saved research session was not found." });
+      return;
+    }
+    const researchSession = upsertResearchSession({
+      id: saved.id,
+      ownerKey: requestOwnerKey(request),
+      input: saved.input,
+      productSources: saved.productSources,
+      influencers: saved.influencers
+    });
+    response.json({
+      search: saved.input,
+      filterState: saved.filterState,
+      productBrief: saved.productBrief,
+      productSources: saved.productSources,
+      influencers: saved.influencers,
+      messages: saved.messages,
+      researchSession,
+      resumed: true
+    });
+  } catch (error) {
+    console.error("Workspace research resume failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "Saved research could not be resumed right now." });
+  }
 });
 
 app.listen(port, "127.0.0.1", () => {

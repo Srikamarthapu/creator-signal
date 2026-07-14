@@ -1,0 +1,1 @@
+-- Intentionally empty. Production records must come from authenticated users and real provider data.

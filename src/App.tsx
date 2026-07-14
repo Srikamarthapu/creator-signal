@@ -1,19 +1,30 @@
 import {
+  Activity,
   AlertTriangle,
   BarChart3,
+  BookmarkPlus,
+  BriefcaseBusiness,
   Check,
   CircleDollarSign,
   Copy,
   ExternalLink,
   Loader2,
+  LogIn,
+  LogOut,
   Mail,
   RefreshCcw,
   Search,
+  Settings,
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { readLocal, storageKeys, writeLocal } from "./lib/storage";
+import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { AuthScreen } from "./components/AuthScreen";
+import { useAuth } from "./components/AuthProvider";
+import { CampaignCopilot } from "./components/CampaignCopilot";
+import { WorkspaceScreen } from "./components/WorkspaceScreen";
+import { apiFetch } from "./lib/api";
+import { agentThreadStorageKey, readLocal, storageKeys, writeLocal } from "./lib/storage";
 import type {
   CampaignRisk,
   InfluencerEvaluation,
@@ -23,8 +34,16 @@ import type {
   ProductIntelligence,
   RealInfluencer,
   RealInfluencerResponse,
+  ResearchSessionMeta,
+  SavedResearchResponse,
   SearchState
 } from "./lib/types";
+
+const CampaignDetailScreen = lazy(() => import("./components/CampaignDetailScreen").then((module) => ({ default: module.CampaignDetailScreen })));
+const InvitationScreen = lazy(() => import("./components/InvitationScreen").then((module) => ({ default: module.InvitationScreen })));
+const ShortlistDetailScreen = lazy(() => import("./components/ShortlistDetailScreen").then((module) => ({ default: module.ShortlistDetailScreen })));
+const SupportScreen = lazy(() => import("./components/SupportScreen").then((module) => ({ default: module.SupportScreen })));
+const WorkspaceSettingsScreen = lazy(() => import("./components/WorkspaceSettingsScreen").then((module) => ({ default: module.WorkspaceSettingsScreen })));
 
 const goals = ["Sales", "Awareness", "UGC", "Product launch"];
 const budgets = ["Under $1k", "$1k to $5k", "$5k to $20k", "$20k plus"];
@@ -63,8 +82,51 @@ function readStoredSearch() {
   };
 }
 
+function newResearchSessionId() {
+  const cryptoApi: Crypto | undefined = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === "function") return cryptoApi.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (cryptoApi) {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 function pathFromWindow() {
   return window.location.pathname;
+}
+
+function savedResearchId(path: string) {
+  const match = path.match(/^\/research\/([0-9a-f-]{36})$/i);
+  return match?.[1] || "";
+}
+
+function workspaceResourceId(path: string, resource: "shortlist" | "campaign") {
+  const match = path.match(new RegExp(`^/${resource}/([0-9a-f-]{36})$`, "i"));
+  return match?.[1] || "";
+}
+
+function invitationToken(path: string) {
+  const match = path.match(/^\/invite\/([A-Za-z0-9_-]{20,100})$/);
+  return match?.[1] || "";
+}
+
+function normalizeSavedSearch(search: SavedResearchResponse["search"]): SearchState {
+  const platform = platforms.includes(search.platform as Platform | "Any")
+    ? search.platform as Platform | "Any"
+    : defaultSearch.platform;
+  return {
+    product: search.product.trim(),
+    goal: typeof search.goal === "string" && search.goal.trim() ? search.goal : defaultSearch.goal,
+    budget: typeof search.budget === "string" && search.budget.trim() ? search.budget : defaultSearch.budget,
+    platform,
+    audience: typeof search.audience === "string" && search.audience.trim() ? search.audience : defaultSearch.audience
+  };
 }
 
 function initials(name: string) {
@@ -185,6 +247,7 @@ function realInfluencerMatchesQuality(influencer: RealInfluencer, filter: RealQu
 }
 
 export default function App() {
+  const auth = useAuth();
   const [path, setPath] = useState(pathFromWindow);
   const [searchState, setSearchState] = useState<SearchState>(readStoredSearch);
   const [formState, setFormState] = useState<SearchState>(readStoredSearch);
@@ -208,6 +271,11 @@ export default function App() {
   const [realInfluencerEvaluationsLoading, setRealInfluencerEvaluationsLoading] = useState(false);
   const [realInfluencerEvaluationsError, setRealInfluencerEvaluationsError] = useState("");
   const [realOutreachInfluencer, setRealOutreachInfluencer] = useState<RealInfluencer | null>(null);
+  const [researchSession, setResearchSession] = useState<ResearchSessionMeta | null>(null);
+  const [shortlistedUrls, setShortlistedUrls] = useState<Set<string>>(() => new Set());
+  const [shortlistSavingUrl, setShortlistSavingUrl] = useState("");
+  const [resumeLoading, setResumeLoading] = useState(false);
+  const [resumeError, setResumeError] = useState("");
 
   useEffect(() => {
     const onPopState = () => setPath(pathFromWindow());
@@ -216,7 +284,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/integrations/status")
+    apiFetch("/api/integrations/status")
       .then((response) => response.json())
       .then((data: IntegrationStatus) => setIntegrationStatus(data))
       .catch(() => setIntegrationStatus(null));
@@ -227,43 +295,120 @@ export default function App() {
     if (!result.ok) setSaveMessage(result.message);
   };
 
-  const navigate = (nextPath: string) => {
+  const navigate = useCallback((nextPath: string) => {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    const researchRunId = savedResearchId(path);
+    if (!researchRunId || auth.loading || auth.workspaceLoading || !auth.user || !auth.activeOrganization) return;
+    let active = true;
+    setResumeLoading(true);
+    setResumeError("");
+    apiFetch(`/api/workspace/research/${researchRunId}?organizationId=${encodeURIComponent(auth.activeOrganization.id)}`)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(payload?.error || "Saved research could not be opened.");
+        return payload as SavedResearchResponse;
+      })
+      .then((saved) => {
+        if (!active) return;
+        const nextSearch = normalizeSavedSearch(saved.search);
+        setSearchState(nextSearch);
+        setFormState(nextSearch);
+        persist(storageKeys.lastSearch, nextSearch);
+        setValidationError("");
+        setSortMode("match");
+        setRiskFilter("Any");
+        setPlatformFilter("Any");
+        setIntentFilter("Any");
+        setQualityFilter("Any");
+        setCostFilter("Any");
+        setRealInfluencers(saved.influencers);
+        setRealInfluencersLoading(false);
+        setRealInfluencersError("");
+        setRealInfluencerEvaluations({});
+        setRealInfluencerEvaluationsLoading(false);
+        setRealInfluencerEvaluationsError("");
+        setRealInfluencerMeta({
+          product: nextSearch.product,
+          brightData: {
+            used: true,
+            sourceCount: saved.researchSession.sourceCount,
+            mode: "saved workspace snapshot"
+          },
+          openaiAgents: {
+            used: false,
+            model: ""
+          },
+          influencers: saved.influencers,
+          researchSession: saved.researchSession,
+          workspacePersistence: {
+            saved: true,
+            researchRunId: saved.researchSession.id,
+            creatorCount: saved.influencers.length,
+            evidenceCount: saved.researchSession.sourceCount
+          },
+          caveat: "Resumed from the Bright Data evidence saved with this research session.",
+          disclaimer: "Displayed names, handles, and claims come from the public sources saved with this research session. Verify current availability and rates before outreach."
+        });
+        setIntelligence(saved.productBrief ? {
+          product: nextSearch.product,
+          brightData: {
+            used: true,
+            sources: saved.productSources
+          },
+          openaiAgents: {
+            used: false,
+            note: "Loaded the saved, source-grounded research brief."
+          },
+          brief: saved.productBrief,
+          researchSession: saved.researchSession,
+          workspacePersistence: {
+            saved: true,
+            researchRunId: saved.researchSession.id,
+            creatorCount: saved.influencers.length,
+            evidenceCount: saved.researchSession.sourceCount
+          },
+          disclaimer: "This is the saved research snapshot. Re-run discovery to refresh public evidence."
+        } : null);
+        setIntelligenceLoading(false);
+        setIntelligenceError("");
+        setShortlistedUrls(new Set());
+        writeLocal(agentThreadStorageKey(saved.researchSession.id), saved.messages.slice(-30));
+        setResearchSession(saved.researchSession);
+        window.history.replaceState({}, "", "/results");
+        setPath("/results");
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      })
+      .catch((error) => {
+        if (active) setResumeError(error instanceof Error ? error.message : "Saved research could not be opened.");
+      })
+      .finally(() => {
+        if (active) setResumeLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+    // `persist` only writes local convenience state and intentionally does not own this request lifecycle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.activeOrganization?.id, auth.loading, auth.user?.id, auth.workspaceLoading, path]);
+
+  const acceptResearchSession = (nextSession: ResearchSessionMeta) => {
+    setResearchSession((current) => {
+      if (!current || current.id !== nextSession.id) return nextSession;
+      return nextSession.sourceCount >= current.sourceCount ? nextSession : current;
+    });
   };
 
-  const requestIntelligence = async (nextSearch: SearchState) => {
+  const requestIntelligence = async (nextSearch: SearchState, researchSessionId: string) => {
     setIntelligenceLoading(true);
     setIntelligenceError("");
     setIntelligence(null);
     try {
-      const response = await fetch("/api/product-intelligence", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          product: nextSearch.product,
-          goal: nextSearch.goal,
-          platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
-          audience: nextSearch.audience
-        })
-      });
-      if (!response.ok) throw new Error("Product intelligence request failed.");
-      const data = (await response.json()) as ProductIntelligence;
-      setIntelligence(data);
-    } catch (error) {
-      setIntelligenceError(error instanceof Error ? error.message : "Product intelligence request failed.");
-    } finally {
-      setIntelligenceLoading(false);
-    }
-  };
-
-  const requestRealInfluencerEvaluations = async (nextSearch: SearchState, influencers: RealInfluencer[]) => {
-    if (!influencers.length) return;
-    setRealInfluencerEvaluationsLoading(true);
-    setRealInfluencerEvaluationsError("");
-    try {
-      const response = await fetch("/api/evaluate-influencers", {
+      const response = await apiFetch("/api/product-intelligence", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -271,6 +416,38 @@ export default function App() {
           goal: nextSearch.goal,
           platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
           audience: nextSearch.audience,
+          budget: nextSearch.budget,
+          researchSessionId,
+          organizationId: auth.activeOrganization?.id
+        })
+      });
+      if (!response.ok) throw new Error("Product intelligence request failed.");
+      const data = (await response.json()) as ProductIntelligence;
+      setIntelligence(data);
+      acceptResearchSession(data.researchSession);
+    } catch (error) {
+      setIntelligenceError(error instanceof Error ? error.message : "Product intelligence request failed.");
+    } finally {
+      setIntelligenceLoading(false);
+    }
+  };
+
+  const requestRealInfluencerEvaluations = async (nextSearch: SearchState, influencers: RealInfluencer[], researchSessionId: string) => {
+    if (!influencers.length) return;
+    setRealInfluencerEvaluationsLoading(true);
+    setRealInfluencerEvaluationsError("");
+    try {
+      const response = await apiFetch("/api/evaluate-influencers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product: nextSearch.product,
+          goal: nextSearch.goal,
+          platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
+          audience: nextSearch.audience,
+          budget: nextSearch.budget,
+          researchSessionId,
+          organizationId: auth.activeOrganization?.id,
           influencers
         })
       });
@@ -288,7 +465,7 @@ export default function App() {
     }
   };
 
-  const requestRealInfluencers = async (nextSearch: SearchState) => {
+  const requestRealInfluencers = async (nextSearch: SearchState, researchSessionId: string) => {
     setRealInfluencersLoading(true);
     setRealInfluencersError("");
     setRealInfluencers([]);
@@ -297,25 +474,66 @@ export default function App() {
     setRealInfluencerEvaluationsError("");
     setRealInfluencerEvaluationsLoading(false);
     try {
-      const response = await fetch("/api/real-influencers", {
+      const response = await apiFetch("/api/real-influencers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           product: nextSearch.product,
           goal: nextSearch.goal,
           platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
-          audience: nextSearch.audience
+          audience: nextSearch.audience,
+          budget: nextSearch.budget,
+          researchSessionId,
+          organizationId: auth.activeOrganization?.id
         })
       });
       if (!response.ok) throw new Error("Real influencer discovery request failed.");
       const data = (await response.json()) as RealInfluencerResponse;
       setRealInfluencers(data.influencers);
       setRealInfluencerMeta(data);
-      void requestRealInfluencerEvaluations(nextSearch, data.influencers);
+      acceptResearchSession(data.researchSession);
+      void requestRealInfluencerEvaluations(nextSearch, data.influencers, researchSessionId);
     } catch (error) {
       setRealInfluencersError(error instanceof Error ? error.message : "Real influencer discovery request failed.");
     } finally {
       setRealInfluencersLoading(false);
+    }
+  };
+
+  const startResearch = (nextSearch: SearchState) => {
+    const researchSessionId = newResearchSessionId();
+    setResearchSession(null);
+    setShortlistedUrls(new Set());
+    void requestRealInfluencers(nextSearch, researchSessionId);
+    void requestIntelligence(nextSearch, researchSessionId);
+  };
+
+  const saveRealInfluencer = async (influencer: RealInfluencer) => {
+    if (!auth.user || !auth.activeOrganization) {
+      navigate("/auth");
+      return;
+    }
+    if (!researchSession || shortlistSavingUrl) return;
+    setShortlistSavingUrl(influencer.sourceUrl);
+    setRealInfluencersError("");
+    try {
+      const response = await apiFetch("/api/workspace/shortlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organizationId: auth.activeOrganization.id,
+          researchSessionId: researchSession.id,
+          sourceUrl: influencer.sourceUrl
+        })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "The creator could not be saved.");
+      setShortlistedUrls((current) => new Set(current).add(influencer.sourceUrl));
+      setSaveMessage(`${influencer.displayName} was saved to your workspace shortlist.`);
+    } catch (saveError) {
+      setRealInfluencersError(saveError instanceof Error ? saveError.message : "The creator could not be saved.");
+    } finally {
+      setShortlistSavingUrl("");
     }
   };
 
@@ -336,17 +554,18 @@ export default function App() {
     setSearchState(nextSearch);
     persist(storageKeys.lastSearch, nextSearch);
     navigate("/results");
-    void requestRealInfluencers(nextSearch);
-    void requestIntelligence(nextSearch);
+    startResearch(nextSearch);
   };
 
-  const localWorkflowPath = path.startsWith("/creator/") || path === "/shortlist" || path === "/campaigns" || path.startsWith("/campaign/");
+  const shortlistDetailId = workspaceResourceId(path, "shortlist");
+  const campaignDetailId = workspaceResourceId(path, "campaign");
+  const activeInvitationToken = invitationToken(path);
+  const localWorkflowPath = path.startsWith("/creator/");
 
   useEffect(() => {
     if (path !== "/results" || !searchState.product.trim()) return;
     if (realInfluencers.length || realInfluencersLoading || realInfluencerMeta || realInfluencersError) return;
-    void requestRealInfluencers(searchState);
-    void requestIntelligence(searchState);
+    startResearch(searchState);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, searchState.product, searchState.goal, searchState.platform, searchState.audience]);
 
@@ -393,7 +612,11 @@ export default function App() {
             intelligence={intelligence}
             intelligenceLoading={intelligenceLoading}
             intelligenceError={intelligenceError}
-            refreshIntelligence={() => requestIntelligence(searchState)}
+            refreshIntelligence={() => {
+              const researchSessionId = researchSession?.id || newResearchSessionId();
+              if (!researchSession) setResearchSession(null);
+              void requestIntelligence(searchState, researchSessionId);
+            }}
             realInfluencers={realInfluencers}
             realInfluencersLoading={realInfluencersLoading}
             realInfluencersError={realInfluencersError}
@@ -401,9 +624,72 @@ export default function App() {
             realInfluencerEvaluations={realInfluencerEvaluations}
             realInfluencerEvaluationsLoading={realInfluencerEvaluationsLoading}
             realInfluencerEvaluationsError={realInfluencerEvaluationsError}
-            refreshRealInfluencers={() => requestRealInfluencers(searchState)}
+            refreshRealInfluencers={() => startResearch(searchState)}
             openRealOutreach={(influencer) => setRealOutreachInfluencer(influencer)}
+            saveRealInfluencer={(influencer) => void saveRealInfluencer(influencer)}
+            shortlistedUrls={shortlistedUrls}
+            shortlistSavingUrl={shortlistSavingUrl}
           />
+        ) : null}
+
+        {path === "/auth" || path === "/signup" || path === "/auth/callback" || path === "/reset-password" ? (
+          <AuthScreen
+            initialMode={path === "/signup" ? "sign-up" : path === "/reset-password" ? "reset" : "sign-in"}
+            navigate={navigate}
+          />
+        ) : null}
+
+        {path === "/workspace" || path === "/shortlist" || path === "/campaigns" ? (
+          <WorkspaceScreen
+            view={path === "/shortlist" ? "shortlists" : path === "/campaigns" ? "campaigns" : "overview"}
+            navigate={navigate}
+          />
+        ) : null}
+
+        {path === "/settings" ? (
+          <Suspense fallback={<div className="workspace-loading" role="status"><Loader2 className="h-5 w-5 animate-spin" /> Opening settings...</div>}>
+            <WorkspaceSettingsScreen navigate={navigate} />
+          </Suspense>
+        ) : null}
+
+        {path === "/internal/support" ? (
+          <Suspense fallback={<div className="workspace-loading" role="status"><Loader2 className="h-5 w-5 animate-spin" /> Opening support console...</div>}>
+            <SupportScreen navigate={navigate} />
+          </Suspense>
+        ) : null}
+
+        {activeInvitationToken ? (
+          <Suspense fallback={<div className="workspace-loading" role="status"><Loader2 className="h-5 w-5 animate-spin" /> Checking invitation...</div>}>
+            <InvitationScreen token={activeInvitationToken} navigate={navigate} />
+          </Suspense>
+        ) : null}
+
+        {shortlistDetailId ? (
+          <Suspense fallback={<div className="workspace-loading" role="status"><Loader2 className="h-5 w-5 animate-spin" /> Opening shortlist...</div>}>
+            <ShortlistDetailScreen shortlistId={shortlistDetailId} navigate={navigate} />
+          </Suspense>
+        ) : null}
+
+        {campaignDetailId ? (
+          <Suspense fallback={<div className="workspace-loading" role="status"><Loader2 className="h-5 w-5 animate-spin" /> Opening campaign...</div>}>
+            <CampaignDetailScreen campaignId={campaignDetailId} navigate={navigate} />
+          </Suspense>
+        ) : null}
+
+        {savedResearchId(path) ? (
+          !auth.configured || (!auth.loading && !auth.user) ? (
+            <AuthScreen navigate={navigate} afterAuthPath={path} />
+          ) : resumeError ? (
+            <div className="workspace-error" role="alert">
+              <p>{resumeError}</p>
+              <button type="button" onClick={() => navigate("/workspace")}>Return to workspace</button>
+            </div>
+          ) : (
+            <div className="workspace-loading" role="status">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              {resumeLoading ? "Opening saved research..." : "Preparing your workspace..."}
+            </div>
+          )
         ) : null}
 
         {localWorkflowPath ? (
@@ -418,6 +704,14 @@ export default function App() {
           close={() => setRealOutreachInfluencer(null)}
         />
       ) : null}
+
+      {path === "/results" ? (
+        <CampaignCopilot
+          session={researchSession}
+          product={searchState.product || formState.product || "this product"}
+          configured={Boolean(integrationStatus?.campaignAgent?.configured)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -429,10 +723,13 @@ function TopNav({
   path: string;
   navigate: (path: string) => void;
 }) {
+  const auth = useAuth();
   const searchActive = path === "/" || path === "/results" || path.startsWith("/creator/");
+  const platformRole = auth.user?.app_metadata?.platform_role;
+  const canOpenSupport = platformRole === "operator" || platformRole === "admin";
   return (
     <header className="sticky top-0 z-30 border-b border-line bg-mist/85 backdrop-blur-xl">
-      <div className="mx-auto grid h-20 max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 sm:px-6 lg:px-8">
+      <div className="top-nav-inner mx-auto grid h-20 max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 sm:px-6 lg:px-8">
         <div className="justify-self-start">
           <button className={`nav-button nav-button-quiet ${searchActive ? "nav-button-active" : ""}`} onClick={() => navigate("/")} aria-label="Start a creator search">
             <Search className="h-4 w-4" />
@@ -443,7 +740,50 @@ function TopNav({
           <span className="brand-mark">CS</span>
           <span>CreatorSignal</span>
         </button>
-        <div className="justify-self-end" aria-hidden="true" />
+        <div className="flex items-center justify-self-end gap-1">
+          {auth.user ? (
+            <>
+              <button className="nav-button nav-button-quiet workspace-nav-button" onClick={() => navigate("/workspace")} aria-label="Open workspace">
+                <BriefcaseBusiness className="h-4 w-4" />
+                <span>{auth.activeOrganization?.name || auth.profile?.displayName || "Workspace"}</span>
+              </button>
+              <button
+                className="ghost-icon-button"
+                type="button"
+                onClick={() => navigate("/settings")}
+                aria-label="Open settings"
+                title="Settings"
+              >
+                <Settings className="h-4 w-4" />
+              </button>
+              {canOpenSupport ? (
+                <button
+                  className="ghost-icon-button"
+                  type="button"
+                  onClick={() => navigate("/internal/support")}
+                  aria-label="Open support console"
+                  title="Support console"
+                >
+                  <Activity className="h-4 w-4" />
+                </button>
+              ) : null}
+              <button
+                className="ghost-icon-button"
+                type="button"
+                onClick={() => void auth.signOut().then(() => navigate("/"))}
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </>
+          ) : (
+            <button className="nav-button nav-button-quiet" onClick={() => navigate("/auth")}>
+              <LogIn className="h-4 w-4" />
+              <span>Sign in</span>
+            </button>
+          )}
+        </div>
       </div>
     </header>
   );
@@ -520,7 +860,7 @@ function SearchScreen({
           {[
             ["Bright Data", "Searches live public web results for creator evidence."],
             ["Source links", "Every creator card must trace back to a visible public result."],
-            ["AI structuring", "NVIDIA NIM formats source-backed candidates when available."],
+            ["GLM analysis", "NVIDIA NIM scores source-backed cards and powers the grounded campaign copilot."],
             ["Real-only results", "Seeded demo profiles are excluded from discovery."]
           ].map(([label, description]) => (
             <div className="source-promise-card" key={label}>
@@ -586,7 +926,10 @@ function ResultsScreen({
   realInfluencerEvaluationsLoading,
   realInfluencerEvaluationsError,
   refreshRealInfluencers,
-  openRealOutreach
+  openRealOutreach,
+  saveRealInfluencer,
+  shortlistedUrls,
+  shortlistSavingUrl
 }: {
   searchState: SearchState;
   formState: SearchState;
@@ -618,6 +961,9 @@ function ResultsScreen({
   realInfluencerEvaluationsError: string;
   refreshRealInfluencers: () => void;
   openRealOutreach: (influencer: RealInfluencer) => void;
+  saveRealInfluencer: (influencer: RealInfluencer) => void;
+  shortlistedUrls: Set<string>;
+  shortlistSavingUrl: string;
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const showRealResults = realInfluencers.length > 0;
@@ -884,6 +1230,9 @@ function ResultsScreen({
                   evaluation={realInfluencerEvaluations[realInfluencerKey(influencer)]}
                   evaluationLoading={realInfluencerEvaluationsLoading}
                   openRealOutreach={openRealOutreach}
+                  saveRealInfluencer={saveRealInfluencer}
+                  shortlisted={shortlistedUrls.has(influencer.sourceUrl)}
+                  shortlistSaving={shortlistSavingUrl === influencer.sourceUrl}
                 />
               ))
             ) : (
@@ -1015,13 +1364,19 @@ function RealInfluencerCard({
   product,
   evaluation,
   evaluationLoading,
-  openRealOutreach
+  openRealOutreach,
+  saveRealInfluencer,
+  shortlisted,
+  shortlistSaving
 }: {
   influencer: RealInfluencer;
   product: string;
   evaluation?: InfluencerEvaluation;
   evaluationLoading: boolean;
   openRealOutreach: (influencer: RealInfluencer) => void;
+  saveRealInfluencer: (influencer: RealInfluencer) => void;
+  shortlisted: boolean;
+  shortlistSaving: boolean;
 }) {
   const buyerSignals = realInfluencerBuyerSignals(influencer, product);
   const displayScore = evaluation?.aiScore ?? influencer.matchScore;
@@ -1128,6 +1483,10 @@ function RealInfluencerCard({
             View profile
           </a>
         ) : null}
+        <button className="secondary-button" type="button" onClick={() => saveRealInfluencer(influencer)} disabled={shortlisted || shortlistSaving}>
+          {shortlistSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : shortlisted ? <Check className="h-4 w-4" /> : <BookmarkPlus className="h-4 w-4" />}
+          {shortlisted ? "Saved" : shortlistSaving ? "Saving" : "Save to shortlist"}
+        </button>
         <button className="ghost-button" onClick={() => openRealOutreach(influencer)}>
           <Mail className="h-4 w-4" />
           Draft outreach
@@ -1320,9 +1679,19 @@ function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
           ready={Boolean(status?.openaiAgents.configured)}
           detail={status?.openaiAgents.configured ? `${status.openaiAgents.displayName}: ${status.openaiAgents.model} configured` : "Add NVIDIA_API_KEY, GOOGLE_API_KEY, or OPENAI_API_KEY to enable live AI extraction"}
         />
+        <ReadinessRow
+          label="Campaign copilot"
+          ready={Boolean(status?.campaignAgent?.configured)}
+          detail={status?.campaignAgent?.configured ? `${status.campaignAgent.displayName}, grounded in Bright Data sessions` : "Add NVIDIA_API_KEY to enable GLM 5.2 chat; source-only retrieval remains available"}
+        />
+        <ReadinessRow
+          label="Saved workspace"
+          ready={Boolean(status?.workspace?.configured && status.workspace.persistenceConfigured)}
+          detail={status?.workspace?.configured && status.workspace.persistenceConfigured ? "Supabase Auth, RLS, and durable server persistence ready" : "Connect a Supabase project to enable accounts and saved work"}
+        />
       </div>
       <p className="mt-4 text-xs leading-5 text-muted">
-        Integrations run on the local API only. Real influencer discovery uses public web sources returned by Bright Data.
+        Provider secrets stay on the API. Real influencer discovery uses public web sources returned by Bright Data.
       </p>
     </div>
   );

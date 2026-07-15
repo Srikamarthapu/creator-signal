@@ -577,6 +577,99 @@ function sourceBackedActionProposals(session, userMessage, citations) {
   }));
 }
 
+function campaignTaskIntent(question) {
+  const normalized = trimText(question, 2400);
+  return /\b(?:add|create|make|set|prepare)\b.{0,50}\b(?:campaign\s+)?(?:task|to-do|todo|reminder|follow-up)\b/i.test(normalized)
+    || /\bremind\s+me\s+to\b/i.test(normalized);
+}
+
+function campaignTaskCreatorDocument(session, question) {
+  const normalized = trimText(question, 2400).toLowerCase();
+  const ranked = rankCreatorDocuments(session);
+  const named = ranked.find((assessment) => questionMentionsCreator(assessment.document, normalized));
+  if (named) return named.document;
+  if (/\b(?:top|best|strongest|first|#\s*1|number one)\b.{0,30}\b(?:creator|influencer|candidate)\b/i.test(normalized)) {
+    return ranked[0]?.document || null;
+  }
+  return null;
+}
+
+function campaignTaskTitle(session, question, creatorDocument) {
+  const normalized = trimText(question, 2400)
+    .replace(/^(?:please\s+)?(?:can|could|would|will)\s+you\s+/i, "")
+    .replace(/[?.!]+$/g, "")
+    .trim();
+  const patterns = [
+    /^(?:please\s+)?(?:add|create|make|set|prepare)\s+(?:a\s+)?(?:campaign\s+)?(?:task|to-do|todo|reminder|follow-up)\s+(?:for\s+me\s+)?(?:to\s+)?(.+)$/i,
+    /^(?:please\s+)?remind\s+me\s+to\s+(.+)$/i
+  ];
+  let title = patterns.map((pattern) => normalized.match(pattern)?.[1]?.trim()).find(Boolean) || normalized;
+  if (creatorDocument) {
+    title = title.replace(
+      /\b(?:the\s+)?(?:top|best|strongest|first|#\s*1|number one)\s+(?:creator|influencer|candidate)\b/ig,
+      creatorDocument.creatorName
+    );
+  }
+  title = trimText(title.replace(/^to\s+/i, ""), 240);
+  if (!title || /^(?:task|to-do|todo|reminder|follow-up)$/i.test(title)) {
+    title = creatorDocument
+      ? `Follow up with ${creatorDocument.creatorName} about ${session.input.product}`
+      : `Review next steps for ${session.input.product}`;
+  }
+  return `${title.charAt(0).toUpperCase()}${title.slice(1)}`;
+}
+
+function campaignTaskResult(session, userMessage, campaign) {
+  const creatorDocument = campaignTaskCreatorDocument(session, userMessage?.content);
+  const citations = creatorDocument ? [citationShape(creatorDocument)] : [];
+  if (!campaign?.id || !campaign?.name) {
+    return {
+      answer: "I can prepare that task after this research has a real campaign workspace. Save the creator you want, approve the shortlist, and create the campaign; then I can add the task there for your confirmation.",
+      citations,
+      actions: [],
+      suggestions: ["Save the strongest creator", "Build a three-creator shortlist", "Compare the top two creators"],
+      toolsUsed: [{ name: "prepare_campaign_task", label: "Checked for a campaign linked to this research" }],
+      providerUsed: false,
+      model: "z-ai/glm-5.2",
+      note: "No workspace change was proposed because this research is not linked to a campaign yet."
+    };
+  }
+  if (["complete", "cancelled"].includes(campaign.status)) {
+    return {
+      answer: `The ${campaign.name} campaign is ${campaign.status}, so I cannot add a new task to it. Reopen the campaign or start a new campaign from current research before assigning more work.`,
+      citations,
+      actions: [],
+      suggestions: ["Compare the top two creators", "What evidence should I refresh?", "Draft outreach for the top creator"],
+      toolsUsed: [{ name: "prepare_campaign_task", label: `Checked the ${campaign.name} campaign status` }],
+      providerUsed: false,
+      model: "z-ai/glm-5.2",
+      note: "No workspace change was proposed for a closed campaign."
+    };
+  }
+  const taskTitle = campaignTaskTitle(session, userMessage?.content, creatorDocument);
+  const requestSeed = userMessage?.id || deterministicUuid(`${session.id}:${userMessage?.content || taskTitle}`);
+  return {
+    answer: `I prepared "${taskTitle}" for the ${campaign.name} campaign. Nothing has changed yet; review the action below and confirm it when ready.`,
+    citations,
+    actions: [{
+      id: deterministicUuid(`${session.id}:${requestSeed}:create_campaign_task:${campaign.id}:${taskTitle}`),
+      type: "create_campaign_task",
+      campaignId: campaign.id,
+      campaignName: campaign.name,
+      taskTitle,
+      dueAt: null,
+      label: `Create task in ${campaign.name}`,
+      requiresConfirmation: true,
+      status: "pending"
+    }],
+    suggestions: ["What should I verify before outreach?", "Draft outreach for the top creator", "Compare the top two creators"],
+    toolsUsed: [{ name: "prepare_campaign_task", label: `Prepared one confirmed task for ${campaign.name}` }],
+    providerUsed: false,
+    model: "z-ai/glm-5.2",
+    note: "This task uses the customer instruction and server-authorized campaign context. It is not created until confirmed."
+  };
+}
+
 function completeGroundedAgentTurn(session, userMessage, result) {
   const creatorComparison = sourceBackedCreatorComparison(session, userMessage?.content, result.citations);
   const budgetPlan = sourceBackedBudgetPlan(session, userMessage?.content, result.citations);
@@ -607,7 +700,9 @@ function completeGroundedAgentTurn(session, userMessage, result) {
       excludedCosts: budgetPlan.excludedCosts,
       disclaimer: budgetPlan.disclaimer
     } } : {}),
-    actions: sourceBackedActionProposals(session, userMessage, citations)
+    actions: Array.isArray(result.actions)
+      ? result.actions
+      : sourceBackedActionProposals(session, userMessage, citations)
   };
 }
 
@@ -1741,7 +1836,7 @@ function extractiveAnswer(session, question, documents, reason) {
   };
 }
 
-export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymous", messages, nvidia = {}, fetchImpl = fetch }) {
+export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymous", messages, campaign = null, nvidia = {}, fetchImpl = fetch }) {
   pruneSessions();
   const session = sessions.get(sessionId);
   if (!session || session.ownerKey !== ownerKey) return { status: "missing" };
@@ -1749,6 +1844,9 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
   const conversation = compactConversation(messages);
   const userMessage = [...messages].reverse().find((message) => message?.role === "user") || { content: "" };
   const userQuestion = trimText(userMessage.content, 2400);
+  if (campaignTaskIntent(userQuestion)) {
+    return completeGroundedAgentTurn(session, userMessage, campaignTaskResult(session, userMessage, campaign));
+  }
   if (outreachDraftIntent(userQuestion)) {
     const resolution = resolveOutreachDocument(session, userQuestion);
     if (!resolution.document) {

@@ -338,9 +338,26 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 function clientAgentAction(row) {
   const payload = row?.action_payload && typeof row.action_payload === "object" ? row.action_payload : {};
   const result = row?.result_payload && typeof row.result_payload === "object" ? row.result_payload : {};
+  if (row.action_type === "create_campaign_task") {
+    return {
+      id: row.id,
+      type: "create_campaign_task",
+      campaignId: payload.campaign_id || "",
+      campaignName: payload.campaign_name || "Campaign",
+      taskTitle: payload.task_title || "Campaign task",
+      dueAt: payload.due_at || null,
+      label: payload.label || "Create campaign task",
+      requiresConfirmation: true,
+      status: row.status === "complete" ? "created" : row.status,
+      ...(result.campaign_id && result.task_id ? {
+        result: { campaignId: result.campaign_id, taskId: result.task_id }
+      } : {}),
+      ...(row.status === "failed" ? { error: "This task was not created. You can retry it." } : {})
+    };
+  }
   return {
     id: row.id,
-    type: row.action_type,
+    type: "save_creator",
     creatorName: payload.creator_name || "Creator",
     sourceUrl: payload.source_url || "",
     evidenceId: payload.evidence_id || "",
@@ -520,20 +537,31 @@ async function persistAgentActionProposals({
   researchRunId,
   agentRunId,
   actions,
-  allowedSourceUrls
+  allowedSourceUrls,
+  allowedCampaigns = []
 }) {
   if (!Array.isArray(actions) || !actions.length) return 0;
   const allowed = new Set(allowedSourceUrls || []);
+  const campaignById = new Map((allowedCampaigns || []).map((campaign) => [campaign.id, campaign]));
   const validActions = actions.map((action) => {
-    if (
-      !uuidPattern.test(action?.id || "")
-      || action?.type !== "save_creator"
-      || action?.requiresConfirmation !== true
-      || !allowed.has(action?.sourceUrl)
-    ) {
+    if (!uuidPattern.test(action?.id || "") || action?.requiresConfirmation !== true) {
       throw new Error("Agent action was not backed by the active research snapshot.");
     }
-    return action;
+    if (action.type === "save_creator" && allowed.has(action.sourceUrl)) return action;
+    if (action.type === "create_campaign_task") {
+      const campaign = campaignById.get(action.campaignId);
+      const taskTitle = String(action.taskTitle || "").trim();
+      const validDueAt = action.dueAt === null || action.dueAt === undefined || !Number.isNaN(Date.parse(action.dueAt));
+      if (
+        campaign
+        && !["complete", "cancelled"].includes(campaign.status)
+        && campaign.name === action.campaignName
+        && taskTitle
+        && taskTitle.length <= 240
+        && validDueAt
+      ) return action;
+    }
+    throw new Error("Agent action was not backed by the active research snapshot.");
   });
   const actionIds = [...new Set(validActions.map((action) => action.id))];
   if (actionIds.length !== validActions.length) throw new Error("Agent action identifiers must be unique within a turn.");
@@ -550,7 +578,11 @@ async function persistAgentActionProposals({
       || existing.assistant_message_id !== assistantMessageId
       || existing.research_run_id !== researchRunId
       || existing.action_type !== action.type
-      || existing.action_payload?.source_url !== action.sourceUrl
+      || (action.type === "save_creator" && existing.action_payload?.source_url !== action.sourceUrl)
+      || (action.type === "create_campaign_task" && (
+        existing.action_payload?.campaign_id !== action.campaignId
+        || existing.action_payload?.task_title !== action.taskTitle
+      ))
     ) {
       throw new Error("Agent action identifier already belongs to another proposal.");
     }
@@ -570,7 +602,14 @@ async function persistAgentActionProposals({
       action_type: action.type,
       status: "pending",
       position,
-      action_payload: {
+      action_payload: action.type === "create_campaign_task" ? {
+        campaign_id: action.campaignId,
+        campaign_name: String(action.campaignName || "Campaign").slice(0, 160),
+        task_title: String(action.taskTitle || "").trim().slice(0, 240),
+        due_at: action.dueAt || null,
+        label: String(action.label || "Create campaign task").slice(0, 180),
+        requires_confirmation: true
+      } : {
         creator_name: String(action.creatorName || "Creator").slice(0, 160),
         source_url: action.sourceUrl,
         evidence_id: String(action.evidenceId || "").slice(0, 40),
@@ -596,7 +635,8 @@ async function persistConversationExchange({
   provider,
   toolOutput = {},
   researchRunId = null,
-  allowedSourceUrls = []
+  allowedSourceUrls = [],
+  allowedCampaigns = []
 }) {
   const requestMessageId = userMessage.id || crypto.randomUUID();
   const assistantMessageId = deterministicUuid(`${conversationId}:${requestMessageId}:assistant`);
@@ -661,7 +701,8 @@ async function persistConversationExchange({
     researchRunId,
     agentRunId: runData.id,
     actions: agentResult.actions || [],
-    allowedSourceUrls
+    allowedSourceUrls,
+    allowedCampaigns
   }) : 0;
   throwOnError(await workspaceAdmin
     .from("conversations")
@@ -801,6 +842,10 @@ export async function persistAgentExchange({ userId, organizationId, conversatio
     researchRunId: snapshot.id,
     title: snapshot.input.product
   });
+  const linkedCampaign = await loadCampaignContextForResearch({
+    organizationId,
+    researchRunId: snapshot.id
+  });
   return persistConversationExchange({
     userId,
     organizationId,
@@ -809,8 +854,27 @@ export async function persistAgentExchange({ userId, organizationId, conversatio
     agentResult,
     provider: agentResult.providerUsed ? "nvidia" : "source_retrieval",
     researchRunId: snapshot.id,
-    allowedSourceUrls: snapshot.influencers.map((influencer) => influencer.sourceUrl)
+    allowedSourceUrls: snapshot.influencers.map((influencer) => influencer.sourceUrl),
+    allowedCampaigns: linkedCampaign ? [linkedCampaign] : []
   });
+}
+
+export async function loadCampaignContextForResearch({ organizationId, researchRunId }) {
+  if (!workspaceAdmin) return null;
+  const research = throwOnError(await workspaceAdmin
+    .from("research_runs")
+    .select("campaign_id")
+    .eq("org_id", organizationId)
+    .eq("id", researchRunId)
+    .maybeSingle(), "Load linked research campaign");
+  if (!research?.campaign_id) return null;
+  const campaign = throwOnError(await workspaceAdmin
+    .from("campaigns")
+    .select("id, name, status")
+    .eq("org_id", organizationId)
+    .eq("id", research.campaign_id)
+    .maybeSingle(), "Load linked campaign");
+  return campaign ? { id: campaign.id, name: campaign.name, status: campaign.status } : null;
 }
 
 const agentActionColumns = [
@@ -892,7 +956,10 @@ export async function completeAgentAction({ organizationId, conversationId, acti
     .from("agent_action_confirmations")
     .update({
       status: "complete",
-      result_payload: {
+      result_payload: result.taskId ? {
+        campaign_id: result.campaignId,
+        task_id: result.taskId
+      } : {
         shortlist_id: result.shortlistId,
         entry_id: result.entryId,
         creator_id: result.creatorId
@@ -1110,28 +1177,39 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
   const sourceById = new Map(sourceRows.map((source) => [source.id, source]));
   const creatorSource = new Map(sourceRows.filter((source) => source.creator_id).map((source) => [source.creator_id, source]));
 
-  const influencers = recommendationRows.map((recommendation) => {
+  const influencerCandidates = recommendationRows.map((recommendation) => {
     const creator = creatorById.get(recommendation.creator_id);
     const source = sourceById.get(recommendation.primary_evidence_id) || creatorSource.get(recommendation.creator_id);
     if (!creator || !source) return null;
     return {
-      displayName: creator.display_name,
-      handle: creator.handle || undefined,
-      platform: creator.platform,
-      profileUrl: creator.profile_url || undefined,
-      sourceUrl: source.source_url,
-      sourceTitle: source.title,
-      sourceDescription: source.excerpt || "Public source evidence saved from Bright Data.",
-      niche: creator.niche || "Creator discovery result",
-      matchReason: recommendation.match_reason,
-      evidence: Array.isArray(recommendation.strengths) ? recommendation.strengths.map(String).slice(0, 4) : [],
-      confidence: `${recommendation.confidence || source.confidence || "low"}`.replace(/^./, (letter) => letter.toUpperCase()),
-      sourceType: toClientSourceType(source.source_type),
-      matchScore: Number(recommendation.ai_score ?? recommendation.source_score ?? 0),
-      observedAt: source.observed_at,
-      expiresAt: source.expires_at || undefined
+      sourceCreatorMatches: source.creator_id === recommendation.creator_id,
+      influencer: {
+        displayName: creator.display_name,
+        handle: creator.handle || undefined,
+        platform: creator.platform,
+        profileUrl: creator.profile_url || undefined,
+        sourceUrl: source.source_url,
+        sourceTitle: source.title,
+        sourceDescription: source.excerpt || "Public source evidence saved from Bright Data.",
+        niche: creator.niche || "Creator discovery result",
+        matchReason: recommendation.match_reason,
+        evidence: Array.isArray(recommendation.strengths) ? recommendation.strengths.map(String).slice(0, 4) : [],
+        confidence: `${recommendation.confidence || source.confidence || "low"}`.replace(/^./, (letter) => letter.toUpperCase()),
+        sourceType: toClientSourceType(source.source_type),
+        matchScore: Number(recommendation.ai_score ?? recommendation.source_score ?? 0),
+        observedAt: source.observed_at,
+        expiresAt: source.expires_at || undefined
+      }
     };
   }).filter(Boolean);
+  const influencerBySourceUrl = new Map();
+  for (const candidate of influencerCandidates) {
+    const existing = influencerBySourceUrl.get(candidate.influencer.sourceUrl);
+    if (!existing || (candidate.sourceCreatorMatches && !existing.sourceCreatorMatches)) {
+      influencerBySourceUrl.set(candidate.influencer.sourceUrl, candidate);
+    }
+  }
+  const influencers = [...influencerBySourceUrl.values()].map((candidate) => candidate.influencer);
 
   const productSources = sourceRows
     .filter((source) => source.source_type === "product_source")
@@ -1493,6 +1571,16 @@ export async function createCampaignTask({ organizationId, campaignId, userId, t
     p_title: title,
     p_due_at: dueAt || null
   }), "Create campaign task");
+}
+
+export async function createCampaignTaskFromAgent({ organizationId, campaignId, actionId, userId }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  return throwOnError(await workspaceAdmin.rpc("workspace_create_campaign_task_from_agent", {
+    p_org_id: organizationId,
+    p_campaign_id: campaignId,
+    p_agent_action_id: actionId,
+    p_actor_user_id: userId
+  }), "Create confirmed agent campaign task");
 }
 
 export async function setCampaignTaskStatus({ organizationId, campaignId, taskId, userId, status }) {

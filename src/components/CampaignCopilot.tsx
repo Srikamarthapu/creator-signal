@@ -9,6 +9,7 @@ import {
   Copy,
   Database,
   ExternalLink,
+  ListTodo,
   Loader2,
   MessageSquareText,
   RotateCcw,
@@ -406,21 +407,25 @@ export function CampaignCopilot({
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
         if (payload?.action?.id === action.id) updateMessageAction(assistantMessageId, payload.action as CampaignAgentAction);
-        throw new Error(payload?.error || "The creator could not be saved from this agent action.");
+        throw new Error(payload?.error || "The agent action could not be completed.");
       }
-      const savedAction = payload.action as CampaignAgentAction;
-      updateMessageAction(assistantMessageId, savedAction);
-      if (savedAction.status === "saved") onCreatorSaved(savedAction.sourceUrl, savedAction.creatorName);
+      const completedAction = payload.action as CampaignAgentAction;
+      updateMessageAction(assistantMessageId, completedAction);
+      if (completedAction.type === "save_creator" && completedAction.status === "saved") {
+        onCreatorSaved(completedAction.sourceUrl, completedAction.creatorName);
+      }
     } catch (actionError) {
       setMessages((current) => current.map((message) => message.id === assistantMessageId ? {
         ...message,
         actions: message.actions?.map((candidate) => candidate.id === action.id && candidate.status === "processing" ? {
           ...candidate,
           status: "failed",
-          error: "The save did not finish. Retry when ready."
+          error: candidate.type === "create_campaign_task"
+            ? "The task was not created. Retry when ready."
+            : "The save did not finish. Retry when ready."
         } : candidate)
       } : message));
-      setError(actionError instanceof Error ? actionError.message : "The creator could not be saved.");
+      setError(actionError instanceof Error ? actionError.message : "The agent action could not be completed.");
     } finally {
       setBusyActionId("");
     }
@@ -689,36 +694,49 @@ export function CampaignCopilot({
                       </section>
                     ) : null}
                     {message.actions?.length ? (
-                      <div className="copilot-actions" aria-label="Shortlist actions">
+                      <div className="copilot-actions" aria-label="Confirmed agent actions">
                         <div className="copilot-actions-heading">
-                          <strong>Shortlist actions</strong>
+                          <strong>{message.actions.some((action) => action.type === "create_campaign_task") ? "Campaign action" : "Shortlist actions"}</strong>
                           <small>Nothing changes until you confirm.</small>
                         </div>
-                        {message.actions.map((action) => (
-                          <div className={`copilot-action-row copilot-action-${action.status}`} key={action.id}>
-                            <span className="copilot-action-icon" aria-hidden="true">
-                              {action.status === "saved" ? <Check className="h-4 w-4" /> : <BookmarkPlus className="h-4 w-4" />}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <b>{action.creatorName}</b>
-                              <small>{action.status === "saved" ? "Saved to your workspace shortlist" : action.status === "failed" ? action.error || "Save failed" : action.status === "processing" ? "Saving to shortlist..." : "Ready for your approval"}</small>
-                            </span>
-                            {action.status === "saved" && action.result?.shortlistId ? (
-                              <button type="button" onClick={() => navigate(`/shortlist/${action.result?.shortlistId}`)}>
-                                Open <ExternalLink className="h-3.5 w-3.5" />
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled={action.status === "processing" || Boolean(busyActionId)}
-                                onClick={() => void confirmAgentAction(message.id, action)}
-                              >
-                                {action.status === "processing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-                                {action.status === "failed" ? "Retry save" : action.status === "processing" ? "Saving" : "Confirm save"}
-                              </button>
-                            )}
-                          </div>
-                        ))}
+                        {message.actions.map((action) => {
+                          const taskAction = action.type === "create_campaign_task";
+                          const completed = action.status === "saved" || action.status === "created";
+                          const title = taskAction ? action.taskTitle : action.creatorName;
+                          const status = taskAction
+                            ? action.status === "created" ? `Created in ${action.campaignName}` : action.status === "failed" ? action.error || "Task creation failed" : action.status === "processing" ? "Creating campaign task..." : `Ready to add to ${action.campaignName}`
+                            : action.status === "saved" ? "Saved to your workspace shortlist" : action.status === "failed" ? action.error || "Save failed" : action.status === "processing" ? "Saving to shortlist..." : "Ready for your approval";
+                          const resultPath = taskAction && action.result?.campaignId
+                            ? `/campaign/${action.result.campaignId}`
+                            : !taskAction && action.result?.shortlistId
+                              ? `/shortlist/${action.result.shortlistId}`
+                              : "";
+                          return (
+                            <div className={`copilot-action-row copilot-action-${action.status}`} key={action.id}>
+                              <span className="copilot-action-icon" aria-hidden="true">
+                                {completed ? <Check className="h-4 w-4" /> : taskAction ? <ListTodo className="h-4 w-4" /> : <BookmarkPlus className="h-4 w-4" />}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <b>{title}</b>
+                                <small>{status}</small>
+                              </span>
+                              {completed && resultPath ? (
+                                <button type="button" onClick={() => navigate(resultPath)}>
+                                  Open <ExternalLink className="h-3.5 w-3.5" />
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={action.status === "processing" || Boolean(busyActionId)}
+                                  onClick={() => void confirmAgentAction(message.id, action)}
+                                >
+                                  {action.status === "processing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : taskAction ? <ListTodo className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+                                  {action.status === "failed" ? "Retry" : action.status === "processing" ? "Working" : taskAction ? "Confirm task" : "Confirm save"}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : null}
                     {message.note ? <small className="copilot-note">{message.note}</small> : null}

@@ -21,12 +21,14 @@ import {
   completeAgentAction,
   createCampaignFromShortlist,
   createCampaignTask,
+  createCampaignTaskFromAgent,
   createAccountRequest,
   createWorkspaceInvitation,
   finishProviderJob,
   failAgentAction,
   isPlatformOperator,
   loadConversationFromWorkspace,
+  loadCampaignContextForResearch,
   loadCampaignBrief,
   loadCampaignFromWorkspace,
   loadSupportDashboard,
@@ -2584,6 +2586,7 @@ app.post("/api/agent/chat", async (request, response) => {
     return;
   }
 
+  let linkedCampaign = null;
   try {
     const activeResearch = await ensureWorkspaceResearchSession(
       request,
@@ -2594,6 +2597,10 @@ app.post("/api/agent/chat", async (request, response) => {
       response.status(410).json({ error: "This research session expired. Run the creator search again to refresh its evidence." });
       return;
     }
+    linkedCampaign = await loadCampaignContextForResearch({
+      organizationId: parsed.data.organizationId,
+      researchRunId: parsed.data.researchSessionId
+    });
   } catch (error) {
     console.error("Campaign copilot research resume failed", error instanceof Error ? error.message : error);
     response.status(503).json({ error: "The saved research session could not be opened right now." });
@@ -2614,6 +2621,7 @@ app.post("/api/agent/chat", async (request, response) => {
     sessionId: parsed.data.researchSessionId,
     ownerKey: requestOwnerKey(request),
     messages: agentMessages,
+    campaign: linkedCampaign,
     nvidia: {
       apiKey: process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY,
       baseUrl: process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1",
@@ -2727,10 +2735,12 @@ app.post("/api/agent/actions/:actionId/confirm", async (request, response) => {
   }
   if (claimed.state === "complete") {
     response.json({
-      saved: true,
+      completed: true,
       action: claimed.action,
       shortlistId: claimed.action.result?.shortlistId,
-      entryId: claimed.action.result?.entryId
+      entryId: claimed.action.result?.entryId,
+      campaignId: claimed.action.result?.campaignId,
+      taskId: claimed.action.result?.taskId
     });
     return;
   }
@@ -2768,7 +2778,41 @@ app.post("/api/agent/actions/:actionId/confirm", async (request, response) => {
     );
     if (!snapshot) {
       const action = await failClaim("research_unavailable");
-      response.status(410).json({ error: "The linked research is no longer available. Refresh it before retrying this save.", action });
+      response.status(410).json({ error: "The linked research is no longer available. Refresh it before retrying this action.", action });
+      return;
+    }
+    if (claimed.row.action_type === "create_campaign_task") {
+      const campaign = await loadCampaignContextForResearch({
+        organizationId: parsed.data.organizationId,
+        researchRunId: claimed.row.research_run_id
+      });
+      if (!campaign || campaign.id !== claimed.row.action_payload.campaign_id) {
+        const action = await failClaim("campaign_link_changed");
+        response.status(409).json({
+          error: "The campaign linked to this research changed. Ask the agent to prepare a fresh task.",
+          action
+        });
+        return;
+      }
+      const task = await createCampaignTaskFromAgent({
+        organizationId: parsed.data.organizationId,
+        campaignId: campaign.id,
+        actionId: claimed.row.id,
+        userId: user.id
+      });
+      const action = await completeAgentAction({
+        organizationId: parsed.data.organizationId,
+        conversationId: parsed.data.conversationId,
+        actionId: parsed.data.actionId,
+        userId: user.id,
+        result: { campaignId: campaign.id, taskId: task.id }
+      });
+      response.json({ created: true, action, campaignId: campaign.id, taskId: task.id });
+      return;
+    }
+    if (claimed.row.action_type !== "save_creator") {
+      const action = await failClaim("unsupported_action_type");
+      response.status(409).json({ error: "That agent action is no longer supported.", action });
       return;
     }
     const saved = await saveCreatorFromResearch({
@@ -2796,9 +2840,13 @@ app.post("/api/agent/actions/:actionId/confirm", async (request, response) => {
     });
     response.json({ saved: true, action, shortlistId: saved.shortlistId, entryId: saved.entryId });
   } catch (error) {
-    await failClaim("save_failed");
-    console.error("Agent-confirmed creator save failed", error instanceof Error ? error.message : error);
-    response.status(503).json({ error: "The creator could not be saved right now. No placeholder was created." });
+    await failClaim(claimed.row.action_type === "create_campaign_task" ? "task_create_failed" : "save_failed");
+    console.error("Agent-confirmed action failed", error instanceof Error ? error.message : error);
+    response.status(503).json({
+      error: claimed.row.action_type === "create_campaign_task"
+        ? "The campaign task could not be created right now. No duplicate was added."
+        : "The creator could not be saved right now. No placeholder was created."
+    });
   }
 });
 

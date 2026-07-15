@@ -31,9 +31,9 @@ const influencer = {
   matchScore: 88
 };
 
-function createSession() {
+function createSession(id = "3f50dbde-a640-4f24-a748-2f9c7e9e7a11") {
   return upsertResearchSession({
-    id: "3f50dbde-a640-4f24-a748-2f9c7e9e7a11",
+    id,
     input,
     influencerSources: [{
       title: influencer.sourceTitle,
@@ -233,6 +233,66 @@ test("source-only shortlist requests return confirmable actions for cited creato
     nvidia: {}
   });
   assert.deepEqual(contextQuestion.actions, []);
+});
+
+test("campaign task requests become one confirmed action for the linked campaign", async () => {
+  const session = createSession("b25876f7-8f53-40d1-8f57-c8bd1c5a7baa");
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{
+      id: "a05e1b2e-35a5-4db8-9138-bfcb50c7d8fa",
+      role: "user",
+      content: "Add a campaign task to contact the top creator about usage rights."
+    }],
+    campaign: {
+      id: "14b98bcf-bc0c-4d9d-bd3c-4de26d0d0582",
+      name: "Quiet desk launch",
+      status: "sourcing"
+    },
+    nvidia: { apiKey: "must-not-be-called" },
+    fetchImpl: async () => {
+      throw new Error("Campaign task preparation must not call the model.");
+    }
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.providerUsed, false);
+  assert.equal(result.toolsUsed[0].name, "prepare_campaign_task");
+  assert.equal(result.actions.length, 1);
+  assert.equal(result.actions[0].type, "create_campaign_task");
+  assert.equal(result.actions[0].campaignId, "14b98bcf-bc0c-4d9d-bd3c-4de26d0d0582");
+  assert.equal(result.actions[0].campaignName, "Quiet desk launch");
+  assert.equal(result.actions[0].taskTitle, "Contact Desk Tech about usage rights");
+  assert.equal(result.actions[0].status, "pending");
+  assert.deepEqual(result.citations.map((citation) => citation.url), [influencer.sourceUrl]);
+  assert.match(result.answer, /nothing has changed yet/i);
+});
+
+test("campaign task requests do not create orphan actions before a campaign exists", async () => {
+  const session = createSession("ce6a5f0d-c739-4344-840e-f767c1c30dbb");
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Add a task to contact the top creator." }],
+    nvidia: {}
+  });
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.actions, []);
+  assert.match(result.answer, /approve the shortlist, and create the campaign/i);
+  assert.match(result.note, /not linked to a campaign/i);
+
+  const closedCampaign = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Add a task to contact the top creator." }],
+    campaign: {
+      id: "d738f18f-f080-4d85-8681-d8b649be6983",
+      name: "Closed launch",
+      status: "complete"
+    },
+    nvidia: {}
+  });
+  assert.deepEqual(closedCampaign.actions, []);
+  assert.match(closedCampaign.answer, /cannot add a new task/i);
 });
 
 test("rate-limited source-only fallback ranks direct brief fit instead of raw source score", async () => {

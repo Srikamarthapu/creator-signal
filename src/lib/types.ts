@@ -143,21 +143,38 @@ export type RealInfluencerResponse = {
 
 export type CampaignAgentRole = "user" | "assistant";
 
-export type CampaignAgentAction = {
+type CampaignAgentActionBase = {
   id: string;
+  label: string;
+  requiresConfirmation: true;
+  status: "pending" | "processing" | "saved" | "created" | "failed";
+  error?: string;
+};
+
+export type CampaignAgentSaveCreatorAction = CampaignAgentActionBase & {
   type: "save_creator";
   creatorName: string;
   sourceUrl: string;
   evidenceId: string;
-  label: string;
-  requiresConfirmation: true;
-  status: "pending" | "processing" | "saved" | "failed";
   result?: {
     shortlistId: string;
     entryId: string;
   };
-  error?: string;
 };
+
+export type CampaignAgentCreateTaskAction = CampaignAgentActionBase & {
+  type: "create_campaign_task";
+  campaignId: string;
+  campaignName: string;
+  taskTitle: string;
+  dueAt: string | null;
+  result?: {
+    campaignId: string;
+    taskId: string;
+  };
+};
+
+export type CampaignAgentAction = CampaignAgentSaveCreatorAction | CampaignAgentCreateTaskAction;
 
 export type CampaignAgentOutreachDraft = {
   creatorName: string;

@@ -1237,6 +1237,7 @@ function fallbackRealInfluencers(input, sources) {
       const handle = handleFromSource(source);
       const platform = platformFromSource(source);
       const sourceType = sourceTypeFromSource(source);
+      const confidence = sourceType === "profile" || sourceType === "post" ? "Medium" : "Low";
       const evidence = sourceEvidence(source, input.product);
       const relevanceScore = Math.max(0, sourceRelevanceScore(input.product, source));
       return {
@@ -1250,9 +1251,12 @@ function fallbackRealInfluencers(input, sources) {
         niche: input.product || "Creator discovery result",
         matchReason: `Matched "${input.product}" through a Bright Data public search result.`,
         evidence,
-        confidence: sourceType === "profile" || sourceType === "post" ? "Medium" : "Low",
+        confidence,
         sourceType,
-        matchScore: Math.min(99, Math.max(64, 72 + relevanceScore * 4 - index * 2))
+        matchScore: Math.min(
+          sourceEvaluationCeiling({ confidence, sourceType }),
+          Math.max(50, 62 + relevanceScore * 3 - index * 2)
+        )
       };
     })
     .filter((candidate) => displayNameLooksUsable(candidate.displayName) && candidateLooksLikeCreator(candidate) && candidateRelevanceScore(input.product, candidate) >= 2);
@@ -1297,8 +1301,8 @@ async function extractRealInfluencers(input, sources) {
                 `Keep only candidates where the visible source text is related to this product intent: ${productIntentTerms(input.product).join(", ")}.`
               ].join("\n"),
               {
-                timeoutMs: Number(process.env.NVIDIA_REAL_INFLUENCER_TIMEOUT_MS || 60000),
-                attempts: Number(process.env.NVIDIA_MODEL_ATTEMPTS || 2),
+                timeoutMs: Number(process.env.NVIDIA_REAL_INFLUENCER_TIMEOUT_MS || 18000),
+                attempts: Number(process.env.NVIDIA_REAL_INFLUENCER_ATTEMPTS || 1),
                 maxTokens: 520
               }
             );
@@ -1335,7 +1339,10 @@ async function extractRealInfluencers(input, sources) {
         sourceTitle: decodeHtml(candidate.sourceTitle),
         sourceDescription: decodeHtml(candidate.sourceDescription),
         evidence: candidate.evidence.map(decodeHtml),
-        matchScore: Math.min(99, Math.max(64, 78 + candidateRelevanceScore(input.product, candidate) * 3 - index * 2))
+        matchScore: Math.min(
+          sourceEvaluationCeiling(candidate),
+          Math.max(50, 66 + candidateRelevanceScore(input.product, candidate) * 3 - index * 2)
+        )
       })));
 
     return {
@@ -1483,7 +1490,7 @@ async function runInfluencerEvaluationChunk(input, influencers, provider, batchI
               `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
             ].join("\n"),
             {
-              timeoutMs: Number(process.env.NVIDIA_CREATOR_EVALUATION_TIMEOUT_MS || 90000),
+              timeoutMs: Number(process.env.NVIDIA_CREATOR_EVALUATION_TIMEOUT_MS || 16000),
               attempts: Number(process.env.NVIDIA_CREATOR_EVALUATION_ATTEMPTS || 1),
               maxTokens: Number(process.env.NVIDIA_CREATOR_EVALUATION_MAX_TOKENS || 650)
             }
@@ -1546,7 +1553,11 @@ async function evaluateRealInfluencers(input) {
       } else {
         failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason || "AI evaluation batch failed."));
         const retryDelayMs = Math.max(0, Number(process.env.NVIDIA_CREATOR_EVALUATION_RETRY_DELAY_MS || 2500));
-        for (const influencer of batches[index]) {
+        const singleRetryLimit = Math.max(0, Math.min(
+          batches[index].length,
+          Number(process.env.NVIDIA_CREATOR_EVALUATION_SINGLE_RETRIES || 0)
+        ));
+        for (const influencer of batches[index].slice(0, singleRetryLimit)) {
           if (retryDelayMs) await sleep(retryDelayMs);
           try {
             const retryResult = await runInfluencerEvaluationChunk(input, [influencer], provider, 0, 1);
@@ -1818,8 +1829,8 @@ async function buildAgentBrief(input, brightDataResult) {
                 `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
               ].join("\n"),
               {
-                timeoutMs: Number(process.env.NVIDIA_PRODUCT_BRIEF_TIMEOUT_MS || 60000),
-                attempts: Number(process.env.NVIDIA_MODEL_ATTEMPTS || 2),
+                timeoutMs: Number(process.env.NVIDIA_PRODUCT_BRIEF_TIMEOUT_MS || 16000),
+                attempts: Number(process.env.NVIDIA_PRODUCT_BRIEF_ATTEMPTS || 1),
                 maxTokens: 460
               }
             );

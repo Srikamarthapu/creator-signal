@@ -17,6 +17,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
 } from "lucide-react";
 import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { AuthScreen } from "./components/AuthScreen";
@@ -423,9 +424,12 @@ export default function App() {
     setIntelligenceLoading(true);
     setIntelligenceError("");
     setIntelligence(null);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 22_000);
     try {
       const response = await apiFetch("/api/product-intelligence", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           product: nextSearch.product,
@@ -444,8 +448,15 @@ export default function App() {
       setIntelligence(data);
       acceptResearchSession(data.researchSession);
     } catch (error) {
-      setIntelligenceError(error instanceof Error ? error.message : "Product intelligence request failed.");
+      setIntelligenceError(
+        error instanceof Error && error.name === "AbortError"
+          ? "Product signals took too long for this interactive run. The live creator evidence is still available."
+          : error instanceof Error
+            ? error.message
+            : "Product intelligence request failed."
+      );
     } finally {
+      window.clearTimeout(timeout);
       setIntelligenceLoading(false);
     }
   };
@@ -454,9 +465,12 @@ export default function App() {
     if (!influencers.length) return;
     setRealInfluencerEvaluationsLoading(true);
     setRealInfluencerEvaluationsError("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 22_000);
     try {
       const response = await apiFetch("/api/evaluate-influencers", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           product: nextSearch.product,
@@ -478,8 +492,15 @@ export default function App() {
       }
       setRealInfluencerEvaluations(nextEvaluations);
     } catch (error) {
-      setRealInfluencerEvaluationsError(error instanceof Error ? error.message : "AI influencer evaluation request failed.");
+      setRealInfluencerEvaluationsError(
+        error instanceof Error && error.name === "AbortError"
+          ? "AI scoring took too long for this interactive run. Showing the source-based rankings now."
+          : error instanceof Error
+            ? error.message
+            : "AI influencer evaluation request failed."
+      );
     } finally {
+      window.clearTimeout(timeout);
       setRealInfluencerEvaluationsLoading(false);
     }
   };
@@ -640,31 +661,13 @@ export default function App() {
           </div>
         ) : null}
 
-        {path === "/" || resultsVisible ? (
-          <CampaignCopilot
-            variant={path === "/" ? "embedded" : "floating"}
-            session={researchSession}
-            initialMessages={restoredAgentMessages}
-            product={searchState.product || formState.product || "this product"}
-            configured={Boolean(integrationStatus?.campaignAgent?.configured)}
-            navigate={navigate}
-            currentSearch={formState}
-            onStartSearch={startAgentResearch}
-            onCreatorSaved={(sourceUrl, creatorName) => {
-              setShortlistedUrls((current) => new Set(current).add(sourceUrl));
-              setSaveMessage(`${creatorName} was saved to your workspace shortlist.`);
-            }}
-            researchLoading={realInfluencersLoading || intelligenceLoading}
-            researchError={realInfluencersError || intelligenceError}
-          />
-        ) : null}
-
         {path === "/" ? (
           <SearchScreen
             formState={formState}
             setFormState={setFormState}
             validationError={validationError}
             submitSearch={submitSearch}
+            integrationStatus={integrationStatus}
           />
         ) : null}
 
@@ -783,6 +786,23 @@ export default function App() {
         />
       ) : null}
 
+      {path === "/" || resultsVisible ? (
+        <CampaignCopilot
+          session={researchSession}
+          initialMessages={restoredAgentMessages}
+          product={searchState.product || formState.product || "this product"}
+          configured={Boolean(integrationStatus?.campaignAgent?.configured)}
+          navigate={navigate}
+          currentSearch={formState}
+          onStartSearch={startAgentResearch}
+          onCreatorSaved={(sourceUrl, creatorName) => {
+            setShortlistedUrls((current) => new Set(current).add(sourceUrl));
+            setSaveMessage(`${creatorName} was saved to your workspace shortlist.`);
+          }}
+          researchLoading={realInfluencersLoading}
+          researchError={realInfluencersError}
+        />
+      ) : null}
     </div>
   );
 }
@@ -864,26 +884,34 @@ function SearchScreen({
   formState,
   setFormState,
   validationError,
-  submitSearch
+  submitSearch,
+  integrationStatus
 }: {
   formState: SearchState;
   setFormState: (next: SearchState) => void;
   validationError: string;
   submitSearch: (event: FormEvent) => void;
+  integrationStatus: IntegrationStatus | null;
 }) {
   return (
-    <details className="manual-search-panel">
-      <summary>
-        <span>
-          <SlidersHorizontal className="h-4 w-4" />
-          <span>
-            <strong>Manual search</strong>
-            <small>Use structured campaign controls</small>
-          </span>
-        </span>
-        <span className="manual-search-badge">Optional</span>
-      </summary>
-      <div className="manual-search-content">
+    <section className="showcase-grid">
+      <div className="hero-panel">
+        <div className="hero-copy">
+          <p className="eyebrow">Audience demand search</p>
+          <h1>Find creators with audiences already leaning toward your product.</h1>
+          <p>
+            Search real public creator evidence, compare fit, build a shortlist, and move into outreach from one workspace.
+          </p>
+          <button
+            className="agent-primary-launch"
+            type="button"
+            onClick={() => window.dispatchEvent(new Event("creatorsignal:open-agent"))}
+          >
+            <Sparkles className="h-4 w-4" />
+            Open AI research agent
+          </button>
+        </div>
+
         <form className="creator-command" onSubmit={submitSearch}>
           <label className="field-label" htmlFor="product-search">
             Product or category
@@ -926,8 +954,44 @@ function SearchScreen({
             />
           </div>
         </form>
+
+        <div className="source-promise-grid" aria-label="Real creator discovery workflow">
+          {[
+            ["Bright Data", "Searches live public web results for creator evidence."],
+            ["Source links", "Every creator card traces back to visible public evidence."],
+            ["GLM analysis", "The side agent compares only the sources returned for this search."],
+            ["Real-only results", "Seeded and local fallback profiles are excluded from discovery."]
+          ].map(([label, description]) => (
+            <div className="source-promise-card" key={label}>
+              <span className="status-light status-light-on" />
+              <div>
+                <strong>{label}</strong>
+                <p>{description}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
-    </details>
+
+      <aside className="preview-rail">
+        <IntegrationPanel status={integrationStatus} />
+        <div className="surface p-5">
+          <h2 className="section-title">Research standard</h2>
+          <div className="mt-5 grid gap-3">
+            {[
+              ["Live", "Bright Data public-source search"],
+              ["Linked", "Evidence on every result"],
+              ["Grounded", "Agent answers from retrieved sources"]
+            ].map(([value, label]) => (
+              <div className="stat-row" key={label}>
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </aside>
+    </section>
   );
 }
 
@@ -1695,6 +1759,46 @@ function IntegrationUseFlags({ intelligence }: { intelligence: ProductIntelligen
         AI provider {intelligence.openaiAgents.used ? "used for summary" : "not used for this run"}
       </div>
       <p className="text-muted">{intelligence.openaiAgents.note}</p>
+    </div>
+  );
+}
+
+function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
+  return (
+    <div className="surface p-5">
+      <h2 className="section-title">Research readiness</h2>
+      <div className="mt-4 space-y-3">
+        <ReadinessRow
+          label="Bright Data"
+          ready={Boolean(status?.brightData.configured)}
+          detail={status?.brightData.configured ? `Live public search ready for ${status.brightData.country.toUpperCase()}` : "Live source search is not configured"}
+        />
+        <ReadinessRow
+          label="AI research agent"
+          ready={Boolean(status?.campaignAgent?.configured)}
+          detail={status?.campaignAgent?.configured ? `${status.campaignAgent.displayName}, grounded in each Bright Data session` : "Source retrieval remains available without AI analysis"}
+        />
+        <ReadinessRow
+          label="Saved workspace"
+          ready={Boolean(status?.workspace?.configured && status.workspace.persistenceConfigured)}
+          detail={status?.workspace?.configured && status.workspace.persistenceConfigured ? "Accounts, saved research, and shortlists are ready" : "Connect a workspace to save research"}
+        />
+      </div>
+      <p className="mt-4 text-xs leading-5 text-muted">
+        Provider credentials stay on the server. Creator recommendations must retain their public source links.
+      </p>
+    </div>
+  );
+}
+
+function ReadinessRow({ label, ready, detail }: { label: string; ready: boolean; detail: string }) {
+  return (
+    <div className="readiness-row">
+      <span className={`status-light ${ready ? "status-light-on" : ""}`} />
+      <div>
+        <p className="text-sm font-medium">{label}</p>
+        <p className="text-xs text-muted">{detail}</p>
+      </div>
     </div>
   );
 }

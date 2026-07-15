@@ -1,6 +1,6 @@
 # CreatorSignal
 
-CreatorSignal is an evidence-first creator research and campaign workspace. Its GLM 5.2 discovery agent turns a conversation into a bounded live search, Bright Data returns real public creator evidence, and the same agent then evaluates only that active research snapshot. Supabase provides the production identity and persistence foundation.
+CreatorSignal is an evidence-first creator research and campaign workspace. A structured search launches bounded Bright Data discovery, while the GLM 5.2 agent stays available in a side workspace to refine the brief, compare the returned creators, and act only on that active research snapshot. Supabase provides the production identity and persistence foundation.
 
 ## Run Locally
 
@@ -29,7 +29,7 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 - `/results` contains only real public web results returned through Bright Data discovery.
 - No local or generated creator profiles are used as fallback results.
 - The discovery agent can ask for missing campaign context and launch a real Bright Data search before any results exist.
-- The conversation is the primary discovery surface; the structured search controls remain available as an optional manual path.
+- Structured search is the primary discovery surface; the conversational research agent remains available in a side drawer before and after results load.
 - Product-only requests receive one strategic intake question about audience, desired action, and credible creator-content format before discovery.
 - A requested TikTok, Instagram, or YouTube channel is enforced in both the live query and returned creator set.
 - Source match scores are ranking aids, not verified social-platform analytics.
@@ -77,9 +77,9 @@ Platform users with `app_metadata.platform_role` set to `operator` or `admin` ca
 
 ## Demo Path
 
-1. On the home screen, tell the creator discovery agent what you are promoting and the outcome you need. The agent asks only for missing high-value campaign context.
-2. Let the agent launch its `find_creators` tool and wait for the real Bright Data results.
-3. Ask the same agent to compare the strongest fits and inspect its cited source records.
+1. On the home screen, enter the product and structured campaign controls, then launch the real creator search.
+2. Open the side research agent whenever conversational intake would help; it can also launch its bounded `find_creators` tool.
+3. After Bright Data returns results, ask the same side agent to compare the strongest fits and inspect its cited source records.
 4. Open **Brief** to generate, edit, submit, and approve the structured campaign brief.
 5. Save a creator to the organization shortlist and submit it for approval.
 6. Convert the approved shortlist into a campaign and generate source-grounded outreach.

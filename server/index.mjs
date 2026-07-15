@@ -17,11 +17,14 @@ import {
   acceptWorkspaceInvitation,
   authenticateRequest,
   cancelAccountRequest,
+  claimAgentAction,
+  completeAgentAction,
   createCampaignFromShortlist,
   createCampaignTask,
   createAccountRequest,
   createWorkspaceInvitation,
   finishProviderJob,
+  failAgentAction,
   isPlatformOperator,
   loadConversationFromWorkspace,
   loadCampaignBrief,
@@ -206,6 +209,12 @@ const SaveCreatorRequest = z.object({
   organizationId: z.string().uuid(),
   researchSessionId: z.string().uuid(),
   sourceUrl: z.string().url().max(600)
+});
+
+const AgentActionConfirmRequest = z.object({
+  actionId: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  conversationId: z.string().uuid()
 });
 
 const WorkspaceResourceRequest = z.object({
@@ -2567,6 +2576,9 @@ app.post("/api/agent/chat", async (request, response) => {
   )) return;
 
   const conversationId = parsed.data.conversationId || parsed.data.researchSessionId;
+  const agentMessages = parsed.data.messages.map((message) => ({ ...message }));
+  const latestUserMessage = [...agentMessages].reverse().find((message) => message.role === "user");
+  if (latestUserMessage && !latestUserMessage.id) latestUserMessage.id = crypto.randomUUID();
   if (!agentRequestAllowed(request, conversationId)) {
     response.status(429).json({ error: "The campaign copilot is receiving too many requests. Try again in a minute." });
     return;
@@ -2601,7 +2613,7 @@ app.post("/api/agent/chat", async (request, response) => {
   const result = await runGroundedCampaignAgent({
     sessionId: parsed.data.researchSessionId,
     ownerKey: requestOwnerKey(request),
-    messages: parsed.data.messages,
+    messages: agentMessages,
     nvidia: {
       apiKey: process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY,
       baseUrl: process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1",
@@ -2630,7 +2642,7 @@ app.post("/api/agent/chat", async (request, response) => {
     const snapshot = canPersist
       ? getResearchSessionSnapshot(parsed.data.researchSessionId, requestOwnerKey(request))
       : null;
-    const userMessage = [...parsed.data.messages].reverse().find((message) => message.role === "user");
+    const userMessage = [...agentMessages].reverse().find((message) => message.role === "user");
     if (snapshot && userMessage) {
       try {
         const persisted = await persistAgentExchange({
@@ -2661,10 +2673,133 @@ app.post("/api/agent/chat", async (request, response) => {
   response.json({
     ...result,
     session: clientResearchSession(result.session, conversationId),
+    actions: workspacePersistence.saved ? result.actions || [] : [],
     workspacePersistence,
     grounded: true,
     disclaimer: "Answers are restricted to the Bright Data public evidence displayed in this research session. Verify rates, availability, audience analytics, rights, and performance directly."
   });
+});
+
+app.post("/api/agent/actions/:actionId/confirm", async (request, response) => {
+  const parsed = AgentActionConfirmRequest.safeParse({
+    ...request.body,
+    actionId: request.params.actionId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid pending agent action." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in before confirming an agent action." });
+    return;
+  }
+  if (!workspaceIntegrationStatus().persistenceConfigured) {
+    response.status(503).json({ error: "Supabase persistence is not connected in this environment." });
+    return;
+  }
+  if (!await userCanManageOrganization(user.id, parsed.data.organizationId)) {
+    response.status(403).json({ error: "A workspace manager role is required to confirm this action." });
+    return;
+  }
+
+  let claimed;
+  try {
+    claimed = await claimAgentAction({
+      organizationId: parsed.data.organizationId,
+      conversationId: parsed.data.conversationId,
+      actionId: parsed.data.actionId,
+      userId: user.id
+    });
+  } catch (error) {
+    console.error("Agent action claim failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The agent action could not be confirmed right now." });
+    return;
+  }
+
+  if (claimed.state === "missing") {
+    response.status(404).json({ error: "That agent action is not available in this conversation." });
+    return;
+  }
+  if (claimed.state === "processing") {
+    response.status(409).json({ error: "That action is already being processed. Check again in a moment.", action: claimed.action });
+    return;
+  }
+  if (claimed.state === "complete") {
+    response.json({
+      saved: true,
+      action: claimed.action,
+      shortlistId: claimed.action.result?.shortlistId,
+      entryId: claimed.action.result?.entryId
+    });
+    return;
+  }
+
+  const failClaim = async (errorCode) => {
+    try {
+      return await failAgentAction({
+        organizationId: parsed.data.organizationId,
+        conversationId: parsed.data.conversationId,
+        actionId: parsed.data.actionId,
+        userId: user.id,
+        errorCode
+      });
+    } catch (error) {
+      console.error("Agent action failure state could not be saved", error instanceof Error ? error.message : error);
+      return null;
+    }
+  };
+
+  if (!await requireWorkspaceProductAccess(
+    request,
+    response,
+    parsed.data.organizationId,
+    claimed.row.research_run_id
+  )) {
+    await failClaim("workspace_access_denied");
+    return;
+  }
+
+  try {
+    const snapshot = await ensureWorkspaceResearchSession(
+      request,
+      parsed.data.organizationId,
+      claimed.row.research_run_id
+    );
+    if (!snapshot) {
+      const action = await failClaim("research_unavailable");
+      response.status(410).json({ error: "The linked research is no longer available. Refresh it before retrying this save.", action });
+      return;
+    }
+    const saved = await saveCreatorFromResearch({
+      userId: user.id,
+      organizationId: parsed.data.organizationId,
+      snapshot,
+      sourceUrl: claimed.row.action_payload.source_url,
+      auditContext: {
+        actionId: claimed.row.id,
+        conversationId: claimed.row.conversation_id,
+        assistantMessageId: claimed.row.assistant_message_id
+      }
+    });
+    if (!saved) {
+      const action = await failClaim("creator_not_in_research");
+      response.status(409).json({ error: "That creator is no longer part of the linked Bright Data research.", action });
+      return;
+    }
+    const action = await completeAgentAction({
+      organizationId: parsed.data.organizationId,
+      conversationId: parsed.data.conversationId,
+      actionId: parsed.data.actionId,
+      userId: user.id,
+      result: saved
+    });
+    response.json({ saved: true, action, shortlistId: saved.shortlistId, entryId: saved.entryId });
+  } catch (error) {
+    await failClaim("save_failed");
+    console.error("Agent-confirmed creator save failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The creator could not be saved right now. No placeholder was created." });
+  }
 });
 
 app.get("/api/workspace/research/:researchRunId/campaign-brief", async (request, response) => {

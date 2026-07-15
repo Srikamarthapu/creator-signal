@@ -44,17 +44,20 @@ const stopWords = new Set([
 ]);
 
 const researchIntentTerms = new Set([
+  "add",
   "compare",
   "draft",
   "evidence",
   "fit",
   "idea",
+  "keep",
   "next",
   "outreach",
   "plan",
   "rank",
   "recommend",
   "risk",
+  "save",
   "shortlist",
   "source",
   "strategy",
@@ -71,6 +74,14 @@ export class ResearchSessionConflictError extends Error {
 
 function trimText(value, max = 800) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function deterministicUuid(value) {
+  const bytes = Buffer.from(crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 32), "hex");
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function safeProviderFallbackNote(reason, fallback) {
@@ -521,6 +532,56 @@ function citationShape(document) {
     url: document.url,
     excerpt: trimText(document.text, 320),
     creatorName: document.creatorName
+  };
+}
+
+function creatorSaveIntent(question) {
+  const normalized = trimText(question, 2400);
+  return /\b(?:shortlist|save|keep)\b/i.test(normalized)
+    || /\badd\b.{0,40}\b(?:creator|influencer|candidate|shortlist)\b/i.test(normalized);
+}
+
+function requestedCreatorActionLimit(question) {
+  const normalized = trimText(question, 2400).toLowerCase();
+  const countRequest = (word, number) => new RegExp(
+    `\\b(?:top\\s+)?(?:${word}|${number})(?:[-\\s]+)(?:creators?|influencers?|candidates?|results?)\\b|\\b(?:shortlist|save|add|keep)\\b.{0,16}\\b(?:${word}|${number})\\b`
+  ).test(normalized);
+  if (countRequest("five", 5)) return 5;
+  if (countRequest("four", 4)) return 4;
+  if (countRequest("three", 3)) return 3;
+  if (countRequest("two|pair", 2)) return 2;
+  if (countRequest("one", 1) || /\b(?:this creator|that creator)\b/.test(normalized)) return 1;
+  return /\bshortlist\b/.test(normalized) ? 3 : 1;
+}
+
+function sourceBackedActionProposals(session, userMessage, citations) {
+  if (!creatorSaveIntent(userMessage?.content) || !Array.isArray(citations) || !citations.length) return [];
+  const currentCreators = buildResearchDocuments(session).filter((document) => document.kind === "creator");
+  const creatorById = new Map(currentCreators.map((document) => [document.id, document]));
+  const creatorByUrl = new Map(currentCreators.map((document) => [safePublicUrl(document.url), document]));
+  const creatorDocuments = [...new Map(citations.map((citation) => {
+    const document = creatorById.get(trimText(citation?.id, 20)) || creatorByUrl.get(safePublicUrl(citation?.url));
+    return document ? [document.id, document] : null;
+  }).filter(Boolean)).values()];
+  const requestSeed = userMessage?.id || deterministicUuid(`${session.id}:${userMessage?.content || "save creator"}`);
+  return creatorDocuments.slice(0, requestedCreatorActionLimit(userMessage?.content)).map((document) => ({
+    id: deterministicUuid(`${session.id}:${requestSeed}:save_creator:${document.url}`),
+    type: "save_creator",
+    creatorName: document.creatorName,
+    sourceUrl: document.url,
+    evidenceId: document.id,
+    label: `Save ${document.creatorName}`,
+    requiresConfirmation: true,
+    status: "pending"
+  }));
+}
+
+function completeGroundedAgentTurn(session, userMessage, result) {
+  return {
+    status: "ok",
+    session: publicSession(session),
+    ...result,
+    actions: sourceBackedActionProposals(session, userMessage, result.citations)
   };
 }
 
@@ -1410,16 +1471,17 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
   if (!session || session.ownerKey !== ownerKey) return { status: "missing" };
 
   const conversation = compactConversation(messages);
-  const userQuestion = [...conversation].reverse().find((message) => message.role === "user")?.content || "";
+  const userMessage = [...messages].reverse().find((message) => message?.role === "user") || { content: "" };
+  const userQuestion = trimText(userMessage.content, 2400);
   const baselineDocuments = retrieveDocuments(session, userQuestion, DEFAULT_RETRIEVAL_LIMIT);
   if (!baselineDocuments.length) {
-    return { status: "ok", session: publicSession(session), ...extractiveAnswer(session, userQuestion, [], "No current Bright Data evidence matched the question.") };
+    return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, [], "No current Bright Data evidence matched the question."));
   }
 
   const apiKey = nvidia.apiKey;
   const model = nvidia.model || "z-ai/glm-5.2";
   if (!apiKey) {
-    return { status: "ok", session: publicSession(session), ...extractiveAnswer(session, userQuestion, baselineDocuments, "NVIDIA NIM is not configured; used source-only retrieval.") };
+    return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, baselineDocuments, "NVIDIA NIM is not configured; used source-only retrieval."));
   }
 
   const baseMessages = [{ role: "system", content: agentSystemPrompt(session) }, ...conversation];
@@ -1510,12 +1572,10 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
     const answerCitations = allowedCitations(uniqueDocuments, answerCitationIds);
     const citations = [...new Map([...citedDocuments, ...answerCitations].map((document) => [document.id, document])).values()];
     if (!answer || !citations.length) {
-      return { status: "ok", session: publicSession(session), ...extractiveAnswer(session, userQuestion, uniqueDocuments, "GLM 5.2 returned an answer without verifiable evidence citations; used source-only retrieval.") };
+      return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, uniqueDocuments, "GLM 5.2 returned an answer without verifiable evidence citations; used source-only retrieval."));
     }
 
-    return {
-      status: "ok",
-      session: publicSession(session),
+    return completeGroundedAgentTurn(session, userMessage, {
       answer,
       citations: citations.map(citationShape),
       suggestions: Array.isArray(output?.suggestions)
@@ -1528,10 +1588,10 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
       providerUsed: true,
       model: usedModel,
       note: `GLM 5.2 answered from ${citations.length} cited record${citations.length === 1 ? "" : "s"} in this Bright Data research session.`
-    };
+    });
   } catch (error) {
     const note = error instanceof Error ? error.message : "NVIDIA NIM agent request failed.";
-    return { status: "ok", session: publicSession(session), ...extractiveAnswer(session, userQuestion, baselineDocuments, note) };
+    return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, baselineDocuments, note));
   }
 }
 

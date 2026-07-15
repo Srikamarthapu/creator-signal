@@ -143,11 +143,28 @@ export type RealInfluencerResponse = {
 
 export type CampaignAgentRole = "user" | "assistant";
 
+export type CampaignAgentAction = {
+  id: string;
+  type: "save_creator";
+  creatorName: string;
+  sourceUrl: string;
+  evidenceId: string;
+  label: string;
+  requiresConfirmation: true;
+  status: "pending" | "processing" | "saved" | "failed";
+  result?: {
+    shortlistId: string;
+    entryId: string;
+  };
+  error?: string;
+};
+
 export type CampaignAgentMessage = {
   id: string;
   role: CampaignAgentRole;
   content: string;
   citations?: CampaignAgentCitation[];
+  actions?: CampaignAgentAction[];
   toolsUsed?: CampaignAgentToolTrace[];
   providerUsed?: boolean;
   model?: string;
@@ -221,6 +238,7 @@ export type CampaignAgentResponse = {
   session: ResearchSessionMeta;
   answer: string;
   citations: CampaignAgentCitation[];
+  actions: CampaignAgentAction[];
   suggestions: string[];
   toolsUsed: CampaignAgentToolTrace[];
   providerUsed: boolean;

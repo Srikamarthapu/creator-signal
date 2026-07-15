@@ -166,6 +166,73 @@ test("source-only fallback cites only records in the research session", async ()
   assert.equal(result.citations.length, 1);
   assert.equal(result.citations[0].url, influencer.sourceUrl);
   assert.match(result.answer, /\[E1\]/);
+  assert.deepEqual(result.actions, []);
+});
+
+test("source-only shortlist requests return confirmable actions for cited creators only", async () => {
+  const creators = [{
+    ...influencer,
+    displayName: "Mobile Reviews Eh",
+    handle: "mobilereviewseh",
+    sourceUrl: "https://www.youtube.com/watch?v=ergonomic",
+    sourceTitle: "I spent four months testing vertical ergonomic mice",
+    sourceDescription: "A public long-term ergonomic mouse testing result."
+  }, {
+    ...influencer,
+    displayName: "Work From Hype",
+    handle: "workfromhype",
+    sourceUrl: "https://www.youtube.com/watch?v=workspace",
+    sourceTitle: "Ergonomic wireless mouse desk setup review",
+    sourceDescription: "A public desk setup and product review result."
+  }, {
+    ...influencer,
+    displayName: "Tech Audit",
+    handle: "techaudit",
+    sourceUrl: "https://www.youtube.com/watch?v=comparison",
+    sourceTitle: "Wireless mouse comparison for remote work",
+    sourceDescription: "A public comparison focused on remote professionals."
+  }];
+  const session = upsertResearchSession({
+    id: "a1f37a89-2e53-4af2-a0b7-f05f3b19c7fe",
+    input: {
+      product: "ergonomic wireless mouse",
+      goal: "Product launch",
+      platform: "YouTube",
+      audience: "Remote professionals",
+      creatorCriteria: "Review-led content and desk setup relevance"
+    },
+    influencerSources: [],
+    influencers: creators
+  });
+  const userMessage = {
+    id: "4f47ca59-1bfa-4502-aafb-a36c8d73125f",
+    role: "user",
+    content: "Build a three-creator shortlist for outreach."
+  };
+
+  const result = await runGroundedCampaignAgent({ sessionId: session.id, messages: [userMessage], nvidia: {} });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.actions.length, 3);
+  assert.equal(new Set(result.actions.map((action) => action.id)).size, 3);
+  assert.deepEqual(result.actions.map((action) => action.sourceUrl), result.citations.map((citation) => citation.url));
+  assert.ok(result.actions.every((action) => action.type === "save_creator"));
+  assert.ok(result.actions.every((action) => action.requiresConfirmation && action.status === "pending"));
+  assert.ok(result.actions.every((action) => creators.some((creator) => creator.sourceUrl === action.sourceUrl)));
+
+  const ordinaryQuestion = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ id: "98d35d78-a33a-45c1-b3c5-ae9cdf1e095c", role: "user", content: "Who is the strongest fit?" }],
+    nvidia: {}
+  });
+  assert.deepEqual(ordinaryQuestion.actions, []);
+
+  const contextQuestion = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ id: "d7d3c49e-e7c5-42ce-b47b-02e120325c8e", role: "user", content: "Add more context about the evidence quality." }],
+    nvidia: {}
+  });
+  assert.deepEqual(contextQuestion.actions, []);
 });
 
 test("rate-limited source-only fallback ranks direct brief fit instead of raw source score", async () => {

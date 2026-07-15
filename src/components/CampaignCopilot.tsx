@@ -1,5 +1,7 @@
 import {
   Bot,
+  BookmarkPlus,
+  Check,
   CheckCircle2,
   ClipboardCheck,
   CloudOff,
@@ -19,6 +21,7 @@ import { activeAgentConversationStorageKey, agentThreadStorageKey, readLocal, wr
 import { apiFetch } from "../lib/api";
 import { useAuth } from "./AuthProvider";
 import type {
+  CampaignAgentAction,
   CampaignAgentMessage,
   CampaignAgentResponse,
   DiscoveryAgentResponse,
@@ -82,6 +85,7 @@ export function CampaignCopilot({
   const [messages, setMessages] = useState<CampaignAgentMessage[]>([]);
   const [suggestions, setSuggestions] = useState(discoveryPrompts);
   const [loading, setLoading] = useState(false);
+  const [busyActionId, setBusyActionId] = useState("");
   const [error, setError] = useState("");
   const [memoryState, setMemoryState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const [resumableResearchRunId, setResumableResearchRunId] = useState("");
@@ -96,6 +100,7 @@ export function CampaignCopilot({
   useEffect(() => {
     abortRef.current?.abort();
     setLoading(false);
+    setBusyActionId("");
     setError("");
     setInput("");
     setView("chat");
@@ -239,6 +244,7 @@ export function CampaignCopilot({
     setMessages([]);
     setSuggestions(session?.sourceCount && session.creatorCount ? groundedPrompts : discoveryPrompts);
     setLoading(false);
+    setBusyActionId("");
     setError("");
     setMemoryState("idle");
     conversationIdRef.current = messageId();
@@ -299,7 +305,7 @@ export function CampaignCopilot({
         writeLocal(activeAgentConversationStorageKey(auth.activeOrganization.id), data.conversationId);
         setMemoryState(data.workspacePersistence?.saved ? "saved" : "failed");
         const assistantMessage: CampaignAgentMessage = {
-          id: messageId(),
+          id: data.workspacePersistence?.assistantMessageId || messageId(),
           role: "assistant",
           content: data.answer,
           toolsUsed: data.toolsUsed,
@@ -345,10 +351,11 @@ export function CampaignCopilot({
       );
       setMemoryState(data.workspacePersistence?.saved ? "saved" : "failed");
       const assistantMessage: CampaignAgentMessage = {
-        id: messageId(),
+        id: data.workspacePersistence?.assistantMessageId || messageId(),
         role: "assistant",
         content: data.answer,
         citations: data.citations,
+        actions: data.actions,
         toolsUsed: data.toolsUsed,
         providerUsed: data.providerUsed,
         model: data.model,
@@ -364,6 +371,48 @@ export function CampaignCopilot({
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
+    }
+  };
+
+  const updateMessageAction = (assistantMessageId: string, action: CampaignAgentAction) => {
+    setMessages((current) => current.map((message) => message.id === assistantMessageId ? {
+      ...message,
+      actions: message.actions?.map((candidate) => candidate.id === action.id ? action : candidate)
+    } : message));
+  };
+
+  const confirmAgentAction = async (assistantMessageId: string, action: CampaignAgentAction) => {
+    if (!auth.user || !auth.activeOrganization || busyActionId) return;
+    setBusyActionId(action.id);
+    setError("");
+    updateMessageAction(assistantMessageId, { ...action, status: "processing", error: undefined });
+    try {
+      const response = await apiFetch(`/api/agent/actions/${action.id}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organizationId: auth.activeOrganization.id,
+          conversationId: conversationIdRef.current
+        })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (payload?.action?.id === action.id) updateMessageAction(assistantMessageId, payload.action as CampaignAgentAction);
+        throw new Error(payload?.error || "The creator could not be saved from this agent action.");
+      }
+      updateMessageAction(assistantMessageId, payload.action as CampaignAgentAction);
+    } catch (actionError) {
+      setMessages((current) => current.map((message) => message.id === assistantMessageId ? {
+        ...message,
+        actions: message.actions?.map((candidate) => candidate.id === action.id && candidate.status === "processing" ? {
+          ...candidate,
+          status: "failed",
+          error: "The save did not finish. Retry when ready."
+        } : candidate)
+      } : message));
+      setError(actionError instanceof Error ? actionError.message : "The creator could not be saved.");
+    } finally {
+      setBusyActionId("");
     }
   };
 
@@ -526,6 +575,39 @@ export function CampaignCopilot({
                             </span>
                             <ExternalLink className="h-3.5 w-3.5 shrink-0" />
                           </a>
+                        ))}
+                      </div>
+                    ) : null}
+                    {message.actions?.length ? (
+                      <div className="copilot-actions" aria-label="Shortlist actions">
+                        <div className="copilot-actions-heading">
+                          <strong>Shortlist actions</strong>
+                          <small>Nothing changes until you confirm.</small>
+                        </div>
+                        {message.actions.map((action) => (
+                          <div className={`copilot-action-row copilot-action-${action.status}`} key={action.id}>
+                            <span className="copilot-action-icon" aria-hidden="true">
+                              {action.status === "saved" ? <Check className="h-4 w-4" /> : <BookmarkPlus className="h-4 w-4" />}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <b>{action.creatorName}</b>
+                              <small>{action.status === "saved" ? "Saved to your workspace shortlist" : action.status === "failed" ? action.error || "Save failed" : action.status === "processing" ? "Saving to shortlist..." : "Ready for your approval"}</small>
+                            </span>
+                            {action.status === "saved" && action.result?.shortlistId ? (
+                              <button type="button" onClick={() => navigate(`/shortlist/${action.result?.shortlistId}`)}>
+                                Open <ExternalLink className="h-3.5 w-3.5" />
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={action.status === "processing" || Boolean(busyActionId)}
+                                onClick={() => void confirmAgentAction(message.id, action)}
+                              >
+                                {action.status === "processing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+                                {action.status === "failed" ? "Retry save" : action.status === "processing" ? "Saving" : "Confirm save"}
+                              </button>
+                            )}
+                          </div>
                         ))}
                       </div>
                     ) : null}

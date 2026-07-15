@@ -207,7 +207,7 @@ export async function persistResearchSnapshot({ userId, organizationId, snapshot
   };
 }
 
-export async function saveCreatorFromResearch({ userId, organizationId, snapshot, sourceUrl }) {
+export async function saveCreatorFromResearch({ userId, organizationId, snapshot, sourceUrl, auditContext = {} }) {
   const influencer = snapshot.influencers.find((candidate) => candidate.sourceUrl === sourceUrl);
   if (!influencer) return null;
   const persisted = await persistResearchSnapshot({ userId, organizationId, snapshot });
@@ -248,10 +248,14 @@ export async function saveCreatorFromResearch({ userId, organizationId, snapshot
     event_type: "creator.shortlisted",
     entity_type: "shortlist_entry",
     entity_id: entryData.id,
+    request_id: auditContext.actionId || null,
     payload: {
       research_run_id: snapshot.id,
       creator_id: record.creatorId,
-      evidence_source_id: record.evidenceId
+      evidence_source_id: record.evidenceId,
+      ...(auditContext.actionId ? { agent_action_id: auditContext.actionId } : {}),
+      ...(auditContext.conversationId ? { conversation_id: auditContext.conversationId } : {}),
+      ...(auditContext.assistantMessageId ? { assistant_message_id: auditContext.assistantMessageId } : {})
     }
   }), "Record audit event");
 
@@ -329,6 +333,102 @@ async function assertMessageOwnership({ organizationId, conversationId, messageI
   }
 }
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function clientAgentAction(row) {
+  const payload = row?.action_payload && typeof row.action_payload === "object" ? row.action_payload : {};
+  const result = row?.result_payload && typeof row.result_payload === "object" ? row.result_payload : {};
+  return {
+    id: row.id,
+    type: row.action_type,
+    creatorName: payload.creator_name || "Creator",
+    sourceUrl: payload.source_url || "",
+    evidenceId: payload.evidence_id || "",
+    label: payload.label || "Save creator",
+    requiresConfirmation: true,
+    status: row.status === "complete" ? "saved" : row.status,
+    ...(result.shortlist_id && result.entry_id ? {
+      result: { shortlistId: result.shortlist_id, entryId: result.entry_id }
+    } : {}),
+    ...(row.status === "failed" ? { error: "This save did not complete. You can retry it." } : {})
+  };
+}
+
+async function persistAgentActionProposals({
+  userId,
+  organizationId,
+  conversationId,
+  assistantMessageId,
+  researchRunId,
+  agentRunId,
+  actions,
+  allowedSourceUrls
+}) {
+  if (!Array.isArray(actions) || !actions.length) return 0;
+  const allowed = new Set(allowedSourceUrls || []);
+  const validActions = actions.map((action) => {
+    if (
+      !uuidPattern.test(action?.id || "")
+      || action?.type !== "save_creator"
+      || action?.requiresConfirmation !== true
+      || !allowed.has(action?.sourceUrl)
+    ) {
+      throw new Error("Agent action was not backed by the active research snapshot.");
+    }
+    return action;
+  });
+  const actionIds = [...new Set(validActions.map((action) => action.id))];
+  if (actionIds.length !== validActions.length) throw new Error("Agent action identifiers must be unique within a turn.");
+
+  const existingRows = throwOnError(await workspaceAdmin
+    .from("agent_action_confirmations")
+    .select("id, org_id, conversation_id, assistant_message_id, research_run_id, action_type, action_payload")
+    .in("id", actionIds), "Check agent action ownership") || [];
+  for (const existing of existingRows) {
+    const action = validActions.find((candidate) => candidate.id === existing.id);
+    if (
+      existing.org_id !== organizationId
+      || existing.conversation_id !== conversationId
+      || existing.assistant_message_id !== assistantMessageId
+      || existing.research_run_id !== researchRunId
+      || existing.action_type !== action.type
+      || existing.action_payload?.source_url !== action.sourceUrl
+    ) {
+      throw new Error("Agent action identifier already belongs to another proposal.");
+    }
+  }
+
+  const existingIds = new Set(existingRows.map((row) => row.id));
+  const pendingRows = validActions.map((action, position) => ({ action, position }))
+    .filter(({ action }) => !existingIds.has(action.id))
+    .map(({ action, position }) => ({
+      id: action.id,
+      org_id: organizationId,
+      conversation_id: conversationId,
+      assistant_message_id: assistantMessageId,
+      research_run_id: researchRunId,
+      agent_run_id: agentRunId,
+      requested_by: userId,
+      action_type: action.type,
+      status: "pending",
+      position,
+      action_payload: {
+        creator_name: String(action.creatorName || "Creator").slice(0, 160),
+        source_url: action.sourceUrl,
+        evidence_id: String(action.evidenceId || "").slice(0, 40),
+        label: String(action.label || "Save creator").slice(0, 180),
+        requires_confirmation: true
+      }
+    }));
+  if (pendingRows.length) {
+    throwOnError(await workspaceAdmin.from("agent_action_confirmations").upsert(pendingRows, {
+      onConflict: "id",
+      ignoreDuplicates: true
+    }), "Save agent action proposals");
+  }
+  return validActions.length;
+}
+
 async function persistConversationExchange({
   userId,
   organizationId,
@@ -336,7 +436,9 @@ async function persistConversationExchange({
   userMessage,
   agentResult,
   provider,
-  toolOutput = {}
+  toolOutput = {},
+  researchRunId = null,
+  allowedSourceUrls = []
 }) {
   const requestMessageId = userMessage.id || crypto.randomUUID();
   const assistantMessageId = deterministicUuid(`${conversationId}:${requestMessageId}:assistant`);
@@ -390,12 +492,22 @@ async function persistConversationExchange({
       status: "complete"
     }))), "Save tool trace");
   }
+  const actionCount = researchRunId ? await persistAgentActionProposals({
+    userId,
+    organizationId,
+    conversationId,
+    assistantMessageId,
+    researchRunId,
+    agentRunId: runData.id,
+    actions: agentResult.actions || [],
+    allowedSourceUrls
+  }) : 0;
   throwOnError(await workspaceAdmin
     .from("conversations")
     .update({ updated_at: new Date().toISOString() })
     .eq("org_id", organizationId)
     .eq("id", conversationId), "Touch conversation");
-  return { conversationId, userMessageId: requestMessageId, assistantMessageId, agentRunId: runData.id };
+  return { conversationId, userMessageId: requestMessageId, assistantMessageId, agentRunId: runData.id, actionCount };
 }
 
 export async function persistDiscoveryExchange({
@@ -534,8 +646,124 @@ export async function persistAgentExchange({ userId, organizationId, conversatio
     conversationId: activeConversationId,
     userMessage,
     agentResult,
-    provider: agentResult.providerUsed ? "nvidia" : "source_retrieval"
+    provider: agentResult.providerUsed ? "nvidia" : "source_retrieval",
+    researchRunId: snapshot.id,
+    allowedSourceUrls: snapshot.influencers.map((influencer) => influencer.sourceUrl)
   });
+}
+
+const agentActionColumns = [
+  "id",
+  "org_id",
+  "conversation_id",
+  "assistant_message_id",
+  "research_run_id",
+  "agent_run_id",
+  "requested_by",
+  "action_type",
+  "status",
+  "position",
+  "action_payload",
+  "result_payload",
+  "confirmed_by",
+  "confirmed_at",
+  "error_code",
+  "created_at",
+  "updated_at"
+].join(", ");
+
+async function findAgentAction({ organizationId, conversationId, actionId }) {
+  return throwOnError(await workspaceAdmin
+    .from("agent_action_confirmations")
+    .select(agentActionColumns)
+    .eq("org_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("id", actionId)
+    .maybeSingle(), "Load agent action");
+}
+
+export async function claimAgentAction({ organizationId, conversationId, actionId, userId }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  let action = await findAgentAction({ organizationId, conversationId, actionId });
+  if (!action) return { state: "missing", action: null, row: null };
+  if (action.status === "complete") return { state: "complete", action: clientAgentAction(action), row: action };
+
+  if (action.status === "processing") {
+    const stale = Date.now() - new Date(action.updated_at).getTime() > 2 * 60 * 1000;
+    if (!stale) return { state: "processing", action: clientAgentAction(action), row: action };
+    throwOnError(await workspaceAdmin
+      .from("agent_action_confirmations")
+      .update({ status: "failed", error_code: "stale_processing" })
+      .eq("org_id", organizationId)
+      .eq("conversation_id", conversationId)
+      .eq("id", actionId)
+      .eq("status", "processing"), "Release stale agent action");
+  }
+
+  const claimed = throwOnError(await workspaceAdmin
+    .from("agent_action_confirmations")
+    .update({
+      status: "processing",
+      confirmed_by: userId,
+      confirmed_at: new Date().toISOString(),
+      error_code: null
+    })
+    .eq("org_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("id", actionId)
+    .in("status", ["pending", "failed"])
+    .select(agentActionColumns)
+    .maybeSingle(), "Claim agent action");
+  if (claimed) return { state: "claimed", action: clientAgentAction(claimed), row: claimed };
+
+  action = await findAgentAction({ organizationId, conversationId, actionId });
+  if (!action) return { state: "missing", action: null, row: null };
+  return {
+    state: action.status === "complete" ? "complete" : "processing",
+    action: clientAgentAction(action),
+    row: action
+  };
+}
+
+export async function completeAgentAction({ organizationId, conversationId, actionId, userId, result }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  const completed = throwOnError(await workspaceAdmin
+    .from("agent_action_confirmations")
+    .update({
+      status: "complete",
+      result_payload: {
+        shortlist_id: result.shortlistId,
+        entry_id: result.entryId,
+        creator_id: result.creatorId
+      },
+      error_code: null
+    })
+    .eq("org_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("id", actionId)
+    .eq("status", "processing")
+    .eq("confirmed_by", userId)
+    .select(agentActionColumns)
+    .maybeSingle(), "Complete agent action");
+  if (completed) return clientAgentAction(completed);
+  const existing = await findAgentAction({ organizationId, conversationId, actionId });
+  if (existing?.status === "complete") return clientAgentAction(existing);
+  throw new Error("The agent action could not be finalized.");
+}
+
+export async function failAgentAction({ organizationId, conversationId, actionId, userId, errorCode }) {
+  if (!workspaceAdmin) return null;
+  const failed = throwOnError(await workspaceAdmin
+    .from("agent_action_confirmations")
+    .update({ status: "failed", error_code: String(errorCode || "action_failed").slice(0, 80) })
+    .eq("org_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("id", actionId)
+    .eq("status", "processing")
+    .eq("confirmed_by", userId)
+    .select(agentActionColumns)
+    .maybeSingle(), "Fail agent action");
+  return failed ? clientAgentAction(failed) : null;
 }
 
 function toClientSourceType(value) {
@@ -544,7 +772,7 @@ function toClientSourceType(value) {
 
 async function loadConversationTranscript({ organizationId, conversationId }) {
   if (!conversationId) return [];
-  const [messages, agentRuns] = await Promise.all([
+  const [messages, agentRuns, agentActions] = await Promise.all([
     workspaceAdmin
       .from("conversation_messages")
       .select("id, role, content, citations, model, created_at")
@@ -560,10 +788,19 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
       .eq("org_id", organizationId)
       .eq("conversation_id", conversationId)
       .order("started_at", { ascending: false })
-      .limit(100)
+      .limit(100),
+    workspaceAdmin
+      .from("agent_action_confirmations")
+      .select(agentActionColumns)
+      .eq("org_id", organizationId)
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: true })
+      .order("position", { ascending: true })
+      .order("id", { ascending: true })
   ]);
   const messageRows = [...(throwOnError(messages, "Load conversation") || [])].reverse();
   const agentRunRows = [...(throwOnError(agentRuns, "Load agent runs") || [])].reverse();
+  const agentActionRows = throwOnError(agentActions, "Load agent actions") || [];
   const runIds = agentRunRows.map((run) => run.id);
   const toolRows = runIds.length
     ? throwOnError(await workspaceAdmin
@@ -584,6 +821,12 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
     toolsByRun.set(tool.agent_run_id, current);
   }
   const runByRequestMessage = new Map(agentRunRows.map((run) => [run.request_message_id, run]));
+  const actionRowsByAssistantMessage = new Map();
+  for (const action of agentActionRows) {
+    const current = actionRowsByAssistantMessage.get(action.assistant_message_id) || [];
+    current.push(action);
+    actionRowsByAssistantMessage.set(action.assistant_message_id, current);
+  }
   let pendingRun = null;
   return messageRows.map((message) => {
     if (message.role === "user") {
@@ -603,6 +846,9 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
       role: message.role,
       content: message.content,
       citations: Array.isArray(message.citations) ? message.citations : [],
+      actions: (actionRowsByAssistantMessage.get(message.id) || [])
+        .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id))
+        .map(clientAgentAction),
       toolsUsed: run ? toolsByRun.get(run.id) || [] : [],
       model: message.model || run?.model || undefined,
       providerUsed: run ? run.provider === "nvidia" && run.status === "complete" : false,

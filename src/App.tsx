@@ -386,7 +386,7 @@ export default function App() {
         } : null);
         setIntelligenceLoading(false);
         setIntelligenceError("");
-        setShortlistedUrls(new Set());
+        setShortlistedUrls(new Set(saved.shortlistedSourceUrls || []));
         writeLocal(agentThreadStorageKey(saved.researchSession.id), saved.messages.slice(-30));
         setRestoredAgentMessages(saved.messages.slice(-30));
         setResearchSession(saved.researchSession);
@@ -769,6 +769,10 @@ export default function App() {
           navigate={navigate}
           currentSearch={formState}
           onStartSearch={startAgentResearch}
+          onCreatorSaved={(sourceUrl, creatorName) => {
+            setShortlistedUrls((current) => new Set(current).add(sourceUrl));
+            setSaveMessage(`${creatorName} was saved to your workspace shortlist.`);
+          }}
           researchLoading={realInfluencersLoading || intelligenceLoading}
           researchError={realInfluencersError || intelligenceError}
         />

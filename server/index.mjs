@@ -3898,6 +3898,7 @@ app.get("/api/workspace/research/:researchRunId", async (request, response) => {
       productBrief: saved.productBrief,
       productSources: saved.productSources,
       influencers: saved.influencers,
+      shortlistedSourceUrls: saved.shortlistedSourceUrls,
       messages: saved.messages,
       researchSession: clientResearchSession(researchSession, saved.conversationId),
       resumed: true

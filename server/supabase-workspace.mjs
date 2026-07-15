@@ -909,7 +909,7 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
     conversationId = legacyConversation?.id || null;
   }
 
-  const [recommendations, evidenceSources, restoredMessages] = await Promise.all([
+  const [recommendations, evidenceSources, activeShortlistResult, restoredMessages] = await Promise.all([
     workspaceAdmin
       .from("creator_recommendations")
       .select("id, creator_id, primary_evidence_id, rank, source_score, ai_score, confidence, match_reason, strengths, risks, recommended_use, model_snapshot")
@@ -921,10 +921,19 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
       .select("id, creator_id, provider, source_url, source_type, title, excerpt, confidence, observed_at, expires_at")
       .eq("org_id", organizationId)
       .eq("research_run_id", researchRunId),
+    workspaceAdmin
+      .from("shortlists")
+      .select("id")
+      .eq("org_id", organizationId)
+      .eq("research_run_id", researchRunId)
+      .neq("status", "archived")
+      .limit(1)
+      .maybeSingle(),
     loadConversationTranscript({ organizationId, conversationId })
   ]);
   const recommendationRows = throwOnError(recommendations, "Load recommendations") || [];
   const sourceRows = throwOnError(evidenceSources, "Load evidence") || [];
+  const activeShortlist = throwOnError(activeShortlistResult, "Load active research shortlist");
   const creatorIds = [...new Set(recommendationRows.map((row) => row.creator_id).filter(Boolean))];
   const creatorRows = creatorIds.length
     ? throwOnError(await workspaceAdmin
@@ -970,6 +979,18 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
       rank: index + 1
     }));
 
+  const shortlistEntryRows = activeShortlist ? throwOnError(await workspaceAdmin
+    .from("shortlist_entries")
+    .select("recommendation_id, decision")
+    .eq("org_id", organizationId)
+    .eq("shortlist_id", activeShortlist.id)
+    .in("decision", ["saved", "restored"]), "Load saved research creators") || [] : [];
+  const recommendationById = new Map(recommendationRows.map((recommendation) => [recommendation.id, recommendation]));
+  const shortlistedSourceUrls = [...new Set(shortlistEntryRows.map((entry) => {
+    const recommendation = recommendationById.get(entry.recommendation_id);
+    return recommendation ? sourceById.get(recommendation.primary_evidence_id)?.source_url : null;
+  }).filter(Boolean))];
+
   return {
     id: run.id,
     conversationId,
@@ -978,6 +999,7 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
     productBrief: run.product_brief,
     productSources,
     influencers,
+    shortlistedSourceUrls,
     messages: restoredMessages
   };
 }

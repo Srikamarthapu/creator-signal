@@ -65,6 +65,7 @@ export function CampaignCopilot({
   navigate,
   currentSearch,
   onStartSearch,
+  onCreatorSaved,
   researchLoading,
   researchError
 }: {
@@ -75,6 +76,7 @@ export function CampaignCopilot({
   navigate: (path: string) => void;
   currentSearch: SearchState;
   onStartSearch: (search: SearchState, researchSessionId: string, conversationId: string) => void;
+  onCreatorSaved: (sourceUrl: string, creatorName: string) => void;
   researchLoading: boolean;
   researchError: string;
 }) {
@@ -400,7 +402,9 @@ export function CampaignCopilot({
         if (payload?.action?.id === action.id) updateMessageAction(assistantMessageId, payload.action as CampaignAgentAction);
         throw new Error(payload?.error || "The creator could not be saved from this agent action.");
       }
-      updateMessageAction(assistantMessageId, payload.action as CampaignAgentAction);
+      const savedAction = payload.action as CampaignAgentAction;
+      updateMessageAction(assistantMessageId, savedAction);
+      if (savedAction.status === "saved") onCreatorSaved(savedAction.sourceUrl, savedAction.creatorName);
     } catch (actionError) {
       setMessages((current) => current.map((message) => message.id === assistantMessageId ? {
         ...message,

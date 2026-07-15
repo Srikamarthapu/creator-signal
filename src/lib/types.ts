@@ -290,6 +290,7 @@ export type SavedResearchResponse = {
   productBrief: ProductIntelligence["brief"] | null;
   productSources: ProductIntelligence["brightData"]["sources"];
   influencers: RealInfluencer[];
+  shortlistedSourceUrls: string[];
   messages: CampaignAgentMessage[];
   researchSession: ResearchSessionMeta;
   resumed: true;

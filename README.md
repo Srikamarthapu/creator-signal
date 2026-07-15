@@ -39,6 +39,7 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 - Agent conversations, model runs, and bounded tool traces are saved before and after discovery, linked to the resulting research, and restored after refresh.
 - Saving a creator requires a signed-in workspace and persists the exact server-side source record.
 - Shortlists use role-separated review and approval before campaign conversion.
+- Shortlist teams can compare two to four creators, preserve audited tags and notes, and keep those annotations visually separate from Bright Data evidence.
 - Campaign stages, tasks, outreach edits, and approval decisions append audit events.
 - Outreach is grounded in the selected creator's saved evidence and remains locked from copy until approval. No email is sent automatically.
 - Team invitations use single-display links, store only SHA-256 token hashes, require the invited email at acceptance, and expire after seven days.
@@ -83,7 +84,7 @@ Platform users with `app_metadata.platform_role` set to `operator` or `admin` ca
 2. Open the side research agent whenever conversational intake would help; it can also launch its bounded `find_creators` tool.
 3. After Bright Data returns results, ask the same side agent to compare the strongest fits and inspect its cited source records.
 4. Open **Brief** to generate, edit, submit, and approve the structured campaign brief.
-5. Save a creator to the organization shortlist and submit it for approval.
+5. Save creators to the organization shortlist, compare their current evidence, add team tags or notes, and submit the final roster for approval.
 6. Convert the approved shortlist into a campaign and generate source-grounded outreach.
 7. Edit and approve the outreach before copying it for manual use.
 8. Open Settings to invite a teammate, assign roles, and review account data controls.

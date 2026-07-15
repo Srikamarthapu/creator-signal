@@ -1,5 +1,5 @@
 begin;
-select plan(32);
+select plan(39);
 
 insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data)
 values
@@ -75,6 +75,53 @@ $$;
 select ok(
   not has_function_privilege('authenticated', 'public.workspace_transition_shortlist(uuid,uuid,uuid,text)', 'execute'),
   'authenticated clients cannot call the privileged transition function directly'
+);
+
+select ok(
+  not has_function_privilege('authenticated', 'public.workspace_update_shortlist_entry_metadata(uuid,uuid,uuid,uuid,text[],text)', 'execute'),
+  'authenticated clients cannot call the privileged creator metadata function directly'
+);
+
+select lives_ok(
+  format(
+    $$select public.workspace_update_shortlist_entry_metadata(%L, %L, %L, %L, array[' Review first ', 'review first', 'Remote work'], 'Prioritize for a desk setup comparison.')$$,
+    current_setting('test.workflow_org')::uuid,
+    '38888888-8888-4888-8888-888888888888'::uuid,
+    '39999999-9999-4999-8999-999999999991'::uuid,
+    '32222222-2222-4222-8222-222222222222'::uuid
+  ),
+  'a marketer can save normalized creator tags and a team note'
+);
+
+select is(
+  (select tags from public.shortlist_entries where id = '39999999-9999-4999-8999-999999999991'),
+  array['Review first', 'Remote work']::text[],
+  'creator tags are trimmed and deduplicated without losing their chosen order'
+);
+
+select is(
+  (select notes from public.shortlist_entries where id = '39999999-9999-4999-8999-999999999991'),
+  'Prioritize for a desk setup comparison.',
+  'the creator team note is persisted'
+);
+
+select is(
+  (select count(*)::integer from public.audit_events where org_id = current_setting('test.workflow_org')::uuid and event_type = 'shortlist.creator_metadata_updated'),
+  1,
+  'creator metadata changes append an audit event'
+);
+
+select throws_ok(
+  format(
+    $$select public.workspace_update_shortlist_entry_metadata(%L, %L, %L, %L, array['Approver edit'], null)$$,
+    current_setting('test.workflow_org')::uuid,
+    '38888888-8888-4888-8888-888888888888'::uuid,
+    '39999999-9999-4999-8999-999999999991'::uuid,
+    '33333333-3333-4333-8333-333333333333'::uuid
+  ),
+  '42501',
+  'A workspace manager role is required.',
+  'an approver cannot edit creator notes or tags'
 );
 
 select lives_ok(
@@ -162,6 +209,19 @@ select throws_ok(
   'P0001',
   'Reopen the shortlist before changing creator decisions.',
   'approved creator decisions are immutable until review is reopened'
+);
+
+select throws_ok(
+  format(
+    $$select public.workspace_update_shortlist_entry_metadata(%L, %L, %L, %L, array['Late edit'], null)$$,
+    current_setting('test.workflow_org')::uuid,
+    '38888888-8888-4888-8888-888888888888'::uuid,
+    '39999999-9999-4999-8999-999999999991'::uuid,
+    '32222222-2222-4222-8222-222222222222'::uuid
+  ),
+  'P0001',
+  'Reopen the shortlist before editing creator notes or tags.',
+  'approved creator notes and tags are immutable until review is reopened'
 );
 
 select lives_ok(

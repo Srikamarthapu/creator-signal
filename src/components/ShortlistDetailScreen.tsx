@@ -2,13 +2,18 @@ import {
   ArrowLeft,
   BadgeCheck,
   CalendarDays,
+  Check,
   CircleDollarSign,
+  Columns3,
   ExternalLink,
   FileCheck2,
   Loader2,
   LockKeyhole,
+  PencilLine,
+  Plus,
   RotateCcw,
   ShieldCheck,
+  Tag,
   X
 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
@@ -69,6 +74,13 @@ export function ShortlistDetailScreen({
   const [budget, setBudget] = useState("");
   const [startsOn, setStartsOn] = useState("");
   const [endsOn, setEndsOn] = useState("");
+  const [compareEntryIds, setCompareEntryIds] = useState<string[]>([]);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [metadataEntryId, setMetadataEntryId] = useState("");
+  const [metadataTags, setMetadataTags] = useState<string[]>([]);
+  const [metadataTagInput, setMetadataTagInput] = useState("");
+  const [metadataNotes, setMetadataNotes] = useState("");
+  const [metadataError, setMetadataError] = useState("");
 
   const loadShortlist = useCallback(async (signal?: AbortSignal) => {
     if (!auth.activeOrganization) return;
@@ -106,6 +118,11 @@ export function ShortlistDetailScreen({
   );
   const rejectedEntries = (data?.entries.length || 0) - selectedEntries.length;
   const locked = data?.shortlist.status === "approved" || data?.shortlist.status === "archived";
+  const comparisonEntries = useMemo(
+    () => compareEntryIds.map((entryId) => data?.entries.find((entry) => entry.id === entryId)).filter(Boolean) as ShortlistDetailResponse["entries"],
+    [compareEntryIds, data]
+  );
+  const metadataEntry = data?.entries.find((entry) => entry.id === metadataEntryId) || null;
 
   const runMutation = async (key: string, request: () => Promise<Response>, successMessage: string) => {
     if (busyAction) return false;
@@ -155,6 +172,82 @@ export function ShortlistDetailScreen({
       setRejectEntryId("");
       setRejectReason(rejectionReasons[0]);
       setRejectNotes("");
+    }
+  };
+
+  const toggleComparison = (entryId: string) => {
+    setCompareEntryIds((current) => {
+      if (current.includes(entryId)) return current.filter((id) => id !== entryId);
+      if (current.length >= 4) {
+        setNotice("Compare up to four creators at a time.");
+        return current;
+      }
+      setNotice("");
+      return [...current, entryId];
+    });
+  };
+
+  const openMetadataEditor = (entry: ShortlistDetailResponse["entries"][number]) => {
+    setMetadataEntryId(entry.id);
+    setMetadataTags(entry.tags);
+    setMetadataTagInput("");
+    setMetadataNotes(entry.notes || "");
+    setMetadataError("");
+  };
+
+  const addMetadataTag = () => {
+    const nextTag = metadataTagInput.trim();
+    if (!nextTag) return;
+    if (nextTag.length > 40) {
+      setMetadataError("Keep each tag to 40 characters or fewer.");
+      return;
+    }
+    if (metadataTags.some((tag) => tag.toLocaleLowerCase() === nextTag.toLocaleLowerCase())) {
+      setMetadataTagInput("");
+      return;
+    }
+    if (metadataTags.length >= 8) {
+      setMetadataError("Add no more than eight tags.");
+      return;
+    }
+    setMetadataTags((current) => [...current, nextTag]);
+    setMetadataTagInput("");
+    setMetadataError("");
+  };
+
+  const submitMetadata = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!metadataEntryId) return;
+    const pendingTag = metadataTagInput.trim();
+    let nextTags = metadataTags;
+    if (pendingTag && !metadataTags.some((tag) => tag.toLocaleLowerCase() === pendingTag.toLocaleLowerCase())) {
+      if (pendingTag.length > 40) {
+        setMetadataError("Keep each tag to 40 characters or fewer.");
+        return;
+      }
+      if (metadataTags.length >= 8) {
+        setMetadataError("Add no more than eight tags.");
+        return;
+      }
+      nextTags = [...metadataTags, pendingTag];
+    }
+    const saved = await runMutation(
+      `metadata:${metadataEntryId}`,
+      () => apiFetch(`/api/workspace/shortlists/${shortlistId}/entries/${metadataEntryId}/metadata`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organizationId: auth.activeOrganization?.id,
+          tags: nextTags,
+          notes: metadataNotes
+        })
+      }),
+      "Creator notes and tags saved."
+    );
+    if (saved) {
+      setMetadataEntryId("");
+      setMetadataTagInput("");
+      setMetadataError("");
     }
   };
 
@@ -265,23 +358,40 @@ export function ShortlistDetailScreen({
         <span className="approval-strip-icon">{locked ? <LockKeyhole className="h-4 w-4" /> : <ShieldCheck className="h-4 w-4" />}</span>
         <div>
           <strong>{data.shortlist.status === "approved" ? `Approved ${formatDate(data.shortlist.approvedAt)}` : data.shortlist.status === "review" ? "Awaiting an authorized approver" : "Creator decisions remain editable"}</strong>
-          <p>{locked ? "Approved creator decisions are locked to preserve the reviewed evidence set." : "Every rejection and status change is recorded in the workspace audit history."}</p>
+          <p>{locked ? "Approved creator decisions are locked to preserve the reviewed evidence set." : "Creator decisions, notes, tags, and status changes are recorded in the workspace audit history."}</p>
         </div>
       </div>
 
       <section className="shortlist-roster">
         <header>
           <div><p className="eyebrow">Evidence-backed roster</p><h2>{data.entries.length} saved creators</h2></div>
-          <span>{data.research?.sourceCount || data.entries.length} research sources</span>
+          <div className="shortlist-roster-tools">
+            <span>{data.research?.sourceCount || data.entries.length} research sources</span>
+            {compareEntryIds.length ? <button className="ghost-button" type="button" onClick={() => setCompareEntryIds([])}>Clear</button> : null}
+            <button className="secondary-button" type="button" onClick={() => setCompareOpen(true)} disabled={compareEntryIds.length < 2}>
+              <Columns3 className="h-4 w-4" /> Compare {compareEntryIds.length ? `(${compareEntryIds.length})` : ""}
+            </button>
+          </div>
         </header>
         <div className="shortlist-entry-list">
           {data.entries.map((entry) => {
             const creator = entry.creator;
             const score = entry.recommendation?.aiScore ?? entry.recommendation?.sourceScore;
             const isRejected = entry.decision === "rejected" || entry.decision === "archived";
+            const isCompared = compareEntryIds.includes(entry.id);
             return (
-              <article className={`shortlist-entry ${isRejected ? "shortlist-entry-rejected" : ""}`} key={entry.id}>
+              <article className={`shortlist-entry ${isRejected ? "shortlist-entry-rejected" : ""} ${isCompared ? "shortlist-entry-compared" : ""}`} key={entry.id}>
                 <div className="shortlist-creator-identity">
+                  <button
+                    className={`compare-toggle ${isCompared ? "compare-toggle-active" : ""}`}
+                    type="button"
+                    aria-pressed={isCompared}
+                    aria-label={`${isCompared ? "Remove" : "Add"} ${creator?.displayName || "creator"} ${isCompared ? "from" : "to"} comparison`}
+                    title={isCompared ? "Remove from comparison" : "Add to comparison"}
+                    onClick={() => toggleComparison(entry.id)}
+                  >
+                    {isCompared ? <Check className="h-4 w-4" /> : <Columns3 className="h-4 w-4" />}
+                  </button>
                   <span className="shortlist-avatar">{initials(creator?.displayName || "Creator")}</span>
                   <div>
                     <div className="shortlist-name-line"><h3>{creator?.displayName || "Creator record unavailable"}</h3><span className={`decision-pill decision-pill-${entry.decision}`}>{decisionLabel(entry.decision)}</span></div>
@@ -299,17 +409,24 @@ export function ShortlistDetailScreen({
                   {entry.evidence ? (
                     <a href={entry.evidence.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink className="h-3.5 w-3.5" /> {entry.evidence.title}</a>
                   ) : <small>Evidence record unavailable</small>}
-                  {entry.decisionReasons.length ? <small className="decision-reason">Reason: {entry.decisionReasons.join(", ")}{entry.notes ? ` · ${entry.notes}` : ""}</small> : null}
+                  {entry.tags.length ? <div className="shortlist-tag-row" aria-label="Creator tags">{entry.tags.map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
+                  {entry.decisionReasons.length ? <small className="decision-reason">Decision: {entry.decisionReasons.join(", ")}</small> : null}
+                  {entry.notes ? <small className="team-note">Team note: {entry.notes}</small> : null}
                 </div>
                 <div className="shortlist-entry-actions">
                   {data.permissions.canManage && !locked ? (
-                    isRejected ? (
-                      <button className="secondary-button" type="button" onClick={() => void saveDecision(entry.id, "restored")} disabled={Boolean(busyAction)}>
-                        {busyAction === `decision:${entry.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />} Restore
+                    <>
+                      <button className="secondary-button" type="button" onClick={() => openMetadataEditor(entry)} disabled={Boolean(busyAction)}>
+                        <PencilLine className="h-4 w-4" /> Notes
                       </button>
-                    ) : (
-                      <button className="ghost-button" type="button" onClick={() => setRejectEntryId(entry.id)} disabled={Boolean(busyAction)}>Reject</button>
-                    )
+                      {isRejected ? (
+                        <button className="ghost-button" type="button" onClick={() => void saveDecision(entry.id, "restored", [], entry.notes || "")} disabled={Boolean(busyAction)}>
+                          {busyAction === `decision:${entry.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />} Restore
+                        </button>
+                      ) : (
+                        <button className="ghost-button" type="button" onClick={() => setRejectEntryId(entry.id)} disabled={Boolean(busyAction)}>Reject</button>
+                      )}
+                    </>
                   ) : <span className="locked-label"><LockKeyhole className="h-3.5 w-3.5" /> Locked</span>}
                 </div>
               </article>
@@ -317,6 +434,77 @@ export function ShortlistDetailScreen({
           })}
         </div>
       </section>
+
+      {compareOpen && comparisonEntries.length >= 2 ? (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setCompareOpen(false)}>
+          <section className="workflow-dialog shortlist-compare-dialog" role="dialog" aria-modal="true" aria-labelledby="compare-creators-title">
+            <header>
+              <div><p className="eyebrow">Evidence comparison</p><h2 id="compare-creators-title">Compare {comparisonEntries.length} creators</h2></div>
+              <button className="ghost-icon-button" type="button" onClick={() => setCompareOpen(false)} aria-label="Close comparison"><X className="h-5 w-5" /></button>
+            </header>
+            <div className="creator-comparison-grid" style={{ gridTemplateColumns: `repeat(${comparisonEntries.length}, minmax(15rem, 1fr))` }}>
+              {comparisonEntries.map((entry, index) => {
+                const creator = entry.creator;
+                const score = entry.recommendation?.aiScore ?? entry.recommendation?.sourceScore;
+                return (
+                  <article className="creator-comparison-column" key={entry.id}>
+                    <header>
+                      <span className="comparison-rank">{index + 1}</span>
+                      <div><h3>{creator?.displayName || "Creator record unavailable"}</h3><p>{creator?.platform || "Unknown platform"} · {creator?.niche || "Niche not recorded"}</p></div>
+                    </header>
+                    <div className="comparison-score"><span>Match</span><strong>{score === null || score === undefined ? "--" : Math.round(score)}</strong><small>{entry.recommendation?.confidence || entry.evidence?.confidence || "low"} confidence</small></div>
+                    <section><span>Visible fit</span><p>{entry.recommendation?.matchReason || "No fit explanation was saved."}</p></section>
+                    <section><span>Strengths</span>{entry.recommendation?.strengths.length ? <ul>{entry.recommendation.strengths.map((strength) => <li key={strength}>{strength}</li>)}</ul> : <p>None recorded from this source.</p>}</section>
+                    <section><span>Watchouts</span>{entry.recommendation?.risks.length ? <ul>{entry.recommendation.risks.map((risk) => <li key={risk}>{risk}</li>)}</ul> : <p>Verify audience, rates, rights, and availability.</p>}</section>
+                    <section className="comparison-evidence">
+                      <span>Public evidence</span>
+                      {entry.evidence ? <><a href={entry.evidence.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink className="h-3.5 w-3.5" /> {entry.evidence.title}</a><small>Observed {formatDate(entry.evidence.observedAt)}{entry.evidence.expiresAt ? ` · Refresh by ${formatDate(entry.evidence.expiresAt)}` : ""}</small></> : <p>Evidence record unavailable.</p>}
+                    </section>
+                    <section className="comparison-team-context">
+                      <span>Team context</span>
+                      {entry.tags.length ? <div className="shortlist-tag-row">{entry.tags.map((tag) => <span key={tag}>{tag}</span>)}</div> : <p>No tags.</p>}
+                      {entry.notes ? <p>{entry.notes}</p> : null}
+                    </section>
+                  </article>
+                );
+              })}
+            </div>
+            <footer><p className="comparison-guardrail"><ShieldCheck className="h-4 w-4" /> Creator facts come from the linked public evidence; team notes are shown separately.</p><button className="primary-button" type="button" onClick={() => setCompareOpen(false)}>Done</button></footer>
+          </section>
+        </div>
+      ) : null}
+
+      {metadataEntry ? (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setMetadataEntryId("")}>
+          <form className="workflow-dialog" role="dialog" aria-modal="true" aria-labelledby="creator-metadata-title" onSubmit={submitMetadata}>
+            <header><div><p className="eyebrow">Team context</p><h2 id="creator-metadata-title">Notes for {metadataEntry.creator?.displayName || "creator"}</h2></div><button className="ghost-icon-button" type="button" onClick={() => setMetadataEntryId("")} aria-label="Close notes editor"><X className="h-5 w-5" /></button></header>
+            <label>
+              <span><Tag className="h-3.5 w-3.5" /> Tags</span>
+              <div className="metadata-tag-input">
+                <input
+                  value={metadataTagInput}
+                  onChange={(event) => setMetadataTagInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === ",") {
+                      event.preventDefault();
+                      addMetadataTag();
+                    }
+                  }}
+                  maxLength={40}
+                  aria-label="Creator tag"
+                  placeholder="Review first"
+                />
+                <button className="secondary-button" type="button" onClick={addMetadataTag} aria-label="Add creator tag"><Plus className="h-4 w-4" /></button>
+              </div>
+            </label>
+            {metadataTags.length ? <div className="metadata-tag-list" aria-label="Saved creator tags">{metadataTags.map((tag) => <span key={tag}>{tag}<button type="button" onClick={() => setMetadataTags((current) => current.filter((value) => value !== tag))} aria-label={`Remove ${tag} tag`}><X className="h-3 w-3" /></button></span>)}</div> : null}
+            <label><span>Team note</span><textarea value={metadataNotes} onChange={(event) => setMetadataNotes(event.target.value)} maxLength={1000} placeholder="Decision context, follow-up questions, or collaboration ideas" /></label>
+            <div className="metadata-evidence-note"><ShieldCheck className="h-4 w-4" /><span>Team annotations remain separate from public source evidence.</span></div>
+            {metadataError ? <p className="metadata-error" role="alert">{metadataError}</p> : null}
+            <footer><button className="ghost-button" type="button" onClick={() => setMetadataEntryId("")}>Cancel</button><button className="primary-button" type="submit" disabled={Boolean(busyAction)}>{busyAction === `metadata:${metadataEntry.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save</button></footer>
+          </form>
+        </div>
+      ) : null}
 
       {rejectEntryId ? (
         <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setRejectEntryId("")}>

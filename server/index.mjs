@@ -58,6 +58,7 @@ import {
   updateAccountProfile,
   updateOrganizationEntitlement,
   updateOutreachDraft,
+  updateShortlistEntryMetadata,
   updateWorkspaceMember,
   userOrganizationRole,
   userCanManageOrganization,
@@ -306,6 +307,11 @@ const ShortlistDecisionRequest = WorkspaceResourceRequest.extend({
   if (value.decision === "rejected" && !value.reasons.length) {
     context.addIssue({ code: "custom", message: "Choose at least one rejection reason.", path: ["reasons"] });
   }
+});
+
+const ShortlistMetadataRequest = WorkspaceResourceRequest.extend({
+  tags: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
+  notes: z.string().trim().max(1000).default("")
 });
 
 const ShortlistTransitionRequest = WorkspaceResourceRequest.extend({
@@ -3693,6 +3699,39 @@ app.patch("/api/workspace/shortlists/:shortlistId/entries/:entryId", async (requ
     response.json({ saved: true });
   } catch (error) {
     sendWorkspaceWorkflowError(response, error, "The creator decision could not be saved.");
+  }
+});
+
+app.patch("/api/workspace/shortlists/:shortlistId/entries/:entryId/metadata", async (request, response) => {
+  const bodyParsed = ShortlistMetadataRequest.safeParse(request.body);
+  const resourceParsed = z.object({
+    shortlistId: z.string().uuid(),
+    entryId: z.string().uuid()
+  }).safeParse({
+    shortlistId: request.params.shortlistId,
+    entryId: request.params.entryId
+  });
+  if (!bodyParsed.success || !resourceParsed.success) {
+    response.status(400).json({ error: bodyParsed.success ? "Choose a valid shortlist creator." : bodyParsed.error.issues[0]?.message || "Enter valid creator notes and tags." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to update this shortlist." });
+    return;
+  }
+  try {
+    await updateShortlistEntryMetadata({
+      organizationId: bodyParsed.data.organizationId,
+      shortlistId: resourceParsed.data.shortlistId,
+      entryId: resourceParsed.data.entryId,
+      userId: user.id,
+      tags: bodyParsed.data.tags,
+      notes: bodyParsed.data.notes
+    });
+    response.json({ saved: true });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "Creator notes and tags could not be saved.");
   }
 });
 

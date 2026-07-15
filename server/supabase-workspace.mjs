@@ -1410,6 +1410,25 @@ export async function setShortlistEntryDecision({
   }), "Save creator decision");
 }
 
+export async function updateShortlistEntryMetadata({
+  organizationId,
+  shortlistId,
+  entryId,
+  userId,
+  tags,
+  notes
+}) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  return throwOnError(await workspaceAdmin.rpc("workspace_update_shortlist_entry_metadata", {
+    p_org_id: organizationId,
+    p_shortlist_id: shortlistId,
+    p_entry_id: entryId,
+    p_actor_user_id: userId,
+    p_tags: tags,
+    p_notes: notes || null
+  }), "Save creator notes and tags");
+}
+
 export async function transitionShortlist({ organizationId, shortlistId, userId, status }) {
   if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
   return throwOnError(await workspaceAdmin.rpc("workspace_transition_shortlist", {

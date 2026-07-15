@@ -503,20 +503,8 @@
     @apply rounded-full bg-white/15 px-2 py-1 text-[10px] font-semibold text-white;
   }
 
-  .agent-discovery-workspace {
-    @apply grid min-w-0 gap-4;
-  }
-
-  .agent-discovery-heading {
-    @apply max-w-4xl px-1 pt-2;
-  }
-
-  .agent-discovery-heading h1 {
-    @apply mt-2 text-3xl font-semibold leading-tight text-ink sm:text-4xl;
-  }
-
-  .agent-discovery-heading > p:last-child {
-    @apply mt-3 max-w-3xl text-base leading-7 text-muted;
+  .copilot-embedded-shell {
+    @apply min-w-0;
   }
 
   .manual-search-panel {
@@ -576,8 +564,8 @@
   .copilot-panel-embedded {
     width: 100%;
     max-width: none;
-    height: min(44rem, calc(100dvh - 9rem));
-    min-height: 36rem;
+    height: min(48rem, calc(100dvh - 7.5rem));
+    min-height: 38rem;
     box-shadow: 0 18px 50px rgba(31, 33, 31, 0.1);
   }
 
@@ -1332,7 +1320,11 @@
   }
 
   .results-grid {
-    @apply grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px];
+    @apply grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_420px];
+  }
+
+  .results-side-column {
+    @apply flex min-w-0 flex-col gap-4 xl:sticky xl:top-24;
   }
 
   .hero-panel {

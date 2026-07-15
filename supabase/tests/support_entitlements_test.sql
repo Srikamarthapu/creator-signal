@@ -1,5 +1,5 @@
 begin;
-select plan(18);
+select plan(47);
 
 insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data)
 values
@@ -34,6 +34,16 @@ select is(
 select ok(
   not has_table_privilege('authenticated', 'public.provider_jobs', 'select'),
   'provider diagnostics are never exposed directly to authenticated clients'
+);
+
+select ok(
+  not has_table_privilege('authenticated', 'public.provider_retry_jobs', 'select'),
+  'provider retry payloads are never exposed directly to authenticated clients'
+);
+
+select ok(
+  not has_function_privilege('authenticated', 'public.provider_retry_create(uuid,uuid,uuid,uuid,text,jsonb,integer)', 'execute'),
+  'authenticated clients cannot enqueue provider retries directly'
 );
 
 select ok(
@@ -119,9 +129,21 @@ select throws_ok(
 
 select lives_ok(
   format(
-    $$insert into public.provider_jobs (org_id, requested_by, provider, operation, status, latency_ms, source_count, completed_at) values (%L, %L, 'bright_data', 'creator_discovery', 'degraded', 420, 2, now())$$,
+    $$insert into public.research_runs (id, org_id, created_by, status, search_input) values (%L, %L, %L, 'partial', '{"product":"Wireless mouse","platform":"YouTube"}'::jsonb)$$,
+    '56666666-6666-4666-8666-666666666666'::uuid,
     current_setting('test.entitlement_org')::uuid,
     '51111111-1111-4111-8111-111111111111'::uuid
+  ),
+  'a degraded research run can be retained for provider recovery'
+);
+
+select lives_ok(
+  format(
+    $$insert into public.provider_jobs (id, org_id, requested_by, research_run_id, provider, operation, status, latency_ms, source_count, completed_at) values (%L, %L, %L, %L, 'bright_data', 'creator_discovery', 'degraded', 420, 2, now())$$,
+    '57777777-7777-4777-8777-777777777777'::uuid,
+    current_setting('test.entitlement_org')::uuid,
+    '51111111-1111-4111-8111-111111111111'::uuid,
+    '56666666-6666-4666-8666-666666666666'::uuid
   ),
   'the trusted service can record a sanitized provider diagnostic'
 );
@@ -130,6 +152,188 @@ select is(
   (select status from public.provider_jobs where org_id = current_setting('test.entitlement_org')::uuid),
   'degraded',
   'provider job status is retained for support'
+);
+
+select lives_ok(
+  format(
+    $$select public.provider_retry_create(%L, %L, %L, %L, 'creator_discovery', '{"input":{"product":"Wireless mouse","platform":"YouTube"}}'::jsonb, 3)$$,
+    current_setting('test.entitlement_org')::uuid,
+    '51111111-1111-4111-8111-111111111111'::uuid,
+    '56666666-6666-4666-8666-666666666666'::uuid,
+    '57777777-7777-4777-8777-777777777777'::uuid
+  ),
+  'a workspace manager can queue a bounded durable provider retry'
+);
+
+select is(
+  (select status from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'),
+  'queued',
+  'a new provider retry begins queued'
+);
+
+select is(
+  (select queue_length::integer from public.provider_retry_metrics()),
+  1,
+  'the durable queue contains the provider retry message'
+);
+
+select lives_ok(
+  format(
+    $$select public.provider_retry_create(%L, %L, %L, %L, 'creator_discovery', '{"input":{"product":"Wireless mouse"}}'::jsonb, 3)$$,
+    current_setting('test.entitlement_org')::uuid,
+    '51111111-1111-4111-8111-111111111111'::uuid,
+    '56666666-6666-4666-8666-666666666666'::uuid,
+    '57777777-7777-4777-8777-777777777777'::uuid
+  ),
+  'enqueueing the same active research operation is idempotent'
+);
+
+select is(
+  (select count(*)::integer from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'),
+  1,
+  'idempotent enqueueing preserves one active retry record'
+);
+
+select lives_ok(
+  $$select public.provider_retry_claim((select id from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'), 120)$$,
+  'a queue worker can claim the ready provider retry'
+);
+
+select is(
+  (select status from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'),
+  'processing',
+  'claiming a provider retry records its processing state'
+);
+
+select is(
+  (select attempt_count from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'),
+  1,
+  'claiming increments the bounded attempt counter once'
+);
+
+select lives_ok(
+  $$select public.provider_retry_complete((select id from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'), '{"creatorCount":3,"sourceCount":3}'::jsonb)$$,
+  'a queue worker can complete a recovered provider retry'
+);
+
+select is(
+  (select status from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'),
+  'complete',
+  'provider recovery completion is durable'
+);
+
+select ok(
+  (select public.provider_retry_archive(queue_message_id) from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'creator_discovery'),
+  'the processed queue message is archived for an audit trail'
+);
+
+select lives_ok(
+  format(
+    $$select public.provider_retry_create(%L, %L, %L, %L, 'product_research', '{"input":{"product":"Wireless mouse"}}'::jsonb, 3)$$,
+    current_setting('test.entitlement_org')::uuid,
+    '51111111-1111-4111-8111-111111111111'::uuid,
+    '56666666-6666-4666-8666-666666666666'::uuid,
+    '57777777-7777-4777-8777-777777777777'::uuid
+  ),
+  'a second provider operation can be queued independently'
+);
+
+select lives_ok(
+  $$select public.provider_retry_claim((select id from public.provider_retry_jobs where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid and operation = 'product_research'), 120)$$,
+  'the independent provider retry can be claimed'
+);
+
+create temporary table test_provider_retry_message_ids on commit drop as
+select id as retry_id, queue_message_id as initial_message_id
+from public.provider_retry_jobs
+where research_run_id = '56666666-6666-4666-8666-666666666666'::uuid
+  and operation = 'product_research';
+
+select lives_ok(
+  $$select public.provider_retry_fail((select retry_id from test_provider_retry_message_ids), 'provider_unavailable', 'Temporary outage', true, 0)$$,
+  'failing a retry atomically schedules its next queue message'
+);
+
+select is(
+  (select status from public.provider_retry_jobs where id = (select retry_id from test_provider_retry_message_ids)),
+  'queued',
+  'a retryable provider failure returns to queued state'
+);
+
+select isnt(
+  (select queue_message_id from public.provider_retry_jobs where id = (select retry_id from test_provider_retry_message_ids)),
+  (select initial_message_id from test_provider_retry_message_ids),
+  'atomic requeueing records a new durable queue message'
+);
+
+select ok(
+  (select public.provider_retry_archive(initial_message_id) from test_provider_retry_message_ids),
+  'the consumed provider retry message can be archived after atomic requeueing'
+);
+
+select lives_ok(
+  $$select public.provider_retry_claim((select retry_id from test_provider_retry_message_ids), 120)$$,
+  'the atomically requeued provider job can be claimed again'
+);
+
+select is(
+  (select attempt_count from public.provider_retry_jobs where id = (select retry_id from test_provider_retry_message_ids)),
+  2,
+  'the second provider attempt is counted once'
+);
+
+update public.provider_retry_jobs
+set lease_expires_at = now() - interval '1 second'
+where id = (select retry_id from test_provider_retry_message_ids);
+
+select lives_ok(
+  $$select public.provider_retry_claim((select retry_id from test_provider_retry_message_ids), 120)$$,
+  'an expired worker lease can be reclaimed without losing the job'
+);
+
+select is(
+  (select attempt_count from public.provider_retry_jobs where id = (select retry_id from test_provider_retry_message_ids)),
+  3,
+  'reclaiming an expired lease consumes the next bounded attempt'
+);
+
+update public.provider_retry_jobs
+set lease_expires_at = now() - interval '1 second'
+where id = (select retry_id from test_provider_retry_message_ids);
+
+select lives_ok(
+  $$select public.provider_retry_claim((select retry_id from test_provider_retry_message_ids), 120)$$,
+  'an expired final lease is closed without leaving a processing job stranded'
+);
+
+select is(
+  (select status from public.provider_retry_jobs where id = (select retry_id from test_provider_retry_message_ids)),
+  'failed',
+  'an expired final worker lease records a terminal failure'
+);
+
+select ok(
+  (select public.provider_retry_archive(queue_message_id) from public.provider_retry_jobs where id = (select retry_id from test_provider_retry_message_ids)),
+  'the terminal retry queue message can be archived'
+);
+
+select is(
+  (select count(*)::integer from public.audit_events where org_id = current_setting('test.entitlement_org')::uuid and event_type = 'provider.retry_queued'),
+  2,
+  'each provider retry creation appends one audit event without storing request payloads there'
+);
+
+select throws_ok(
+  format(
+    $$select public.provider_retry_create(%L, %L, %L, %L, 'product_research', '{"input":{"product":"Wireless mouse"}}'::jsonb, 3)$$,
+    current_setting('test.entitlement_org')::uuid,
+    '55555555-5555-4555-8555-555555555555'::uuid,
+    '56666666-6666-4666-8666-666666666666'::uuid,
+    '57777777-7777-4777-8777-777777777777'::uuid
+  ),
+  '42501',
+  'A workspace manager role is required.',
+  'an unrelated user cannot queue a provider retry'
 );
 
 set local role authenticated;

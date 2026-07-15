@@ -2114,6 +2114,129 @@ function sanitizedProviderSummary(value) {
     .slice(0, 500) || null;
 }
 
+function oneRpcRow(value) {
+  return Array.isArray(value) ? value[0] || null : value || null;
+}
+
+function clientProviderRetry(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    organizationId: row.org_id,
+    researchRunId: row.research_run_id,
+    provider: row.provider,
+    operation: row.operation,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts,
+    availableAt: row.available_at,
+    claimedAt: row.claimed_at,
+    leaseExpiresAt: row.lease_expires_at,
+    lastErrorCategory: row.last_error_category,
+    lastErrorSummary: row.last_error_summary,
+    resultSummary: row.result_summary || {},
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export async function createProviderRetry({
+  organizationId,
+  userId,
+  researchRunId,
+  providerJobId,
+  operation,
+  payload,
+  maxAttempts = 3
+}) {
+  if (!workspaceAdmin) return null;
+  const retry = oneRpcRow(throwOnError(await workspaceAdmin.rpc("provider_retry_create", {
+    p_org_id: organizationId,
+    p_requested_by: userId,
+    p_research_run_id: researchRunId,
+    p_provider_job_id: providerJobId || null,
+    p_operation: operation,
+    p_payload: payload,
+    p_max_attempts: maxAttempts
+  }), "Queue provider retry"));
+  return clientProviderRetry(retry);
+}
+
+export async function readProviderRetryMessages({ visibilitySeconds = 120, quantity = 2 } = {}) {
+  if (!workspaceAdmin) return [];
+  return throwOnError(await workspaceAdmin.rpc("provider_retry_read", {
+    p_visibility_seconds: visibilitySeconds,
+    p_quantity: quantity
+  }), "Read provider retry queue") || [];
+}
+
+export async function claimProviderRetry({ retryId, leaseSeconds = 120 }) {
+  if (!workspaceAdmin) return null;
+  return oneRpcRow(throwOnError(await workspaceAdmin.rpc("provider_retry_claim", {
+    p_retry_id: retryId,
+    p_lease_seconds: leaseSeconds
+  }), "Claim provider retry"));
+}
+
+export async function completeProviderRetry({ retryId, resultSummary }) {
+  if (!workspaceAdmin) return null;
+  const retry = oneRpcRow(throwOnError(await workspaceAdmin.rpc("provider_retry_complete", {
+    p_retry_id: retryId,
+    p_result_summary: resultSummary || {}
+  }), "Complete provider retry"));
+  return clientProviderRetry(retry);
+}
+
+export async function failProviderRetry({ retryId, errorCategory, errorSummary, requeue, delaySeconds }) {
+  if (!workspaceAdmin) return null;
+  const retry = oneRpcRow(throwOnError(await workspaceAdmin.rpc("provider_retry_fail", {
+    p_retry_id: retryId,
+    p_error_category: errorCategory || "provider_unavailable",
+    p_error_summary: sanitizedProviderSummary(errorSummary),
+    p_requeue: Boolean(requeue),
+    p_delay_seconds: Math.max(0, Number(delaySeconds || 0))
+  }), "Fail provider retry"));
+  return clientProviderRetry(retry);
+}
+
+export async function enqueueProviderRetryMessage({ retryId, delaySeconds }) {
+  if (!workspaceAdmin) return null;
+  return throwOnError(await workspaceAdmin.rpc("provider_retry_enqueue", {
+    p_retry_id: retryId,
+    p_delay_seconds: Math.max(0, Number(delaySeconds || 0))
+  }), "Requeue provider retry");
+}
+
+export async function archiveProviderRetryMessage(messageId) {
+  if (!workspaceAdmin || !messageId) return false;
+  return Boolean(throwOnError(await workspaceAdmin.rpc("provider_retry_archive", {
+    p_message_id: messageId
+  }), "Archive provider retry message"));
+}
+
+export async function loadProviderRetry({ organizationId, retryId, userId }) {
+  if (!workspaceAdmin || !await userCanAccessOrganization(userId, organizationId)) return null;
+  const row = throwOnError(await workspaceAdmin
+    .from("provider_retry_jobs")
+    .select("id, org_id, research_run_id, provider, operation, status, attempt_count, max_attempts, available_at, claimed_at, lease_expires_at, last_error_category, last_error_summary, result_summary, completed_at, created_at, updated_at")
+    .eq("org_id", organizationId)
+    .eq("id", retryId)
+    .maybeSingle(), "Load provider retry");
+  return clientProviderRetry(row);
+}
+
+export async function loadProviderRetryMetrics() {
+  if (!workspaceAdmin) return { queueLength: 0, newestMessageAgeSeconds: null, oldestMessageAgeSeconds: null, totalMessages: 0 };
+  const row = oneRpcRow(throwOnError(await workspaceAdmin.rpc("provider_retry_metrics"), "Load provider retry metrics"));
+  return {
+    queueLength: Number(row?.queue_length || 0),
+    newestMessageAgeSeconds: row?.newest_message_age_seconds === null || row?.newest_message_age_seconds === undefined ? null : Number(row.newest_message_age_seconds),
+    oldestMessageAgeSeconds: row?.oldest_message_age_seconds === null || row?.oldest_message_age_seconds === undefined ? null : Number(row.oldest_message_age_seconds),
+    totalMessages: Number(row?.total_messages || 0)
+  };
+}
+
 export async function startProviderJob({ organizationId, userId, researchRunId, provider, operation, model, metadata }) {
   if (!workspaceAdmin || !organizationId || !userId) return null;
   if (!await userCanAccessOrganization(userId, organizationId)) return null;

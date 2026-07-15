@@ -811,12 +811,7 @@ export function CampaignCopilot({
 
   if (embedded) {
     return (
-      <section className="agent-discovery-workspace" aria-labelledby="agent-discovery-title">
-        <header className="agent-discovery-heading">
-          <p className="eyebrow">AI creator strategist</p>
-          <h1 id="agent-discovery-title">Who should represent your next campaign?</h1>
-          <p>Start with what you’re promoting and the outcome you need. The agent will shape the brief with you, then search real public creator sources.</p>
-        </header>
+      <section className="copilot-embedded-shell" aria-label="AI creator discovery agent">
         {panel}
       </section>
     );

@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { Agent, run } from "@openai/agents";
 import { z } from "zod";
 import { evaluationMakesUnsupportedInference, sourceEvaluationCeiling } from "./evaluation-guard.mjs";
+import { createProviderRetryWorker } from "./provider-retry-worker.mjs";
 import {
   ResearchSessionConflictError,
   draftGroundedCampaignBrief,
@@ -16,17 +17,22 @@ import {
 } from "./research-agent.mjs";
 import {
   acceptWorkspaceInvitation,
+  archiveProviderRetryMessage,
   authenticateRequest,
   cancelAccountRequest,
   claimAgentAction,
+  claimProviderRetry,
   completeAgentAction,
+  completeProviderRetry,
   createCampaignFromShortlist,
   createCampaignTask,
   createCampaignTaskFromAgent,
   createAccountRequest,
+  createProviderRetry,
   createWorkspaceInvitation,
   finishProviderJob,
   failAgentAction,
+  failProviderRetry,
   isPlatformOperator,
   loadConversationFromWorkspace,
   loadCampaignContextForResearch,
@@ -36,8 +42,10 @@ import {
   loadWorkspaceSettings,
   loadShortlistFromWorkspace,
   loadResearchFromWorkspace,
+  loadProviderRetry,
   organizationEntitlementAccess,
   previewWorkspaceInvitation,
+  readProviderRetryMessages,
   removeWorkspaceMember,
   requestOwnerKey,
   saveCampaignBrief,
@@ -1838,6 +1846,31 @@ async function fetchBrightDataProductPageSource(productUrl) {
   }
 }
 
+async function collectProductEvidence(input) {
+  const [serpResult, productPageSource] = await Promise.all([
+    fetchBrightDataSerp(input).catch((error) => ({
+      ok: false,
+      sources: [],
+      error: error instanceof Error ? error.message : "Bright Data request failed."
+    })),
+    fetchBrightDataProductPageSource(input.productUrl).catch(() => null)
+  ]);
+  const mergedSources = [];
+  const seenSources = new Set();
+  for (const source of [productPageSource, ...(serpResult.sources || [])].filter(Boolean)) {
+    const key = source.link || source.title;
+    if (!key || seenSources.has(key)) continue;
+    seenSources.add(key);
+    mergedSources.push({ ...source, rank: mergedSources.length + 1 });
+  }
+  return {
+    ...serpResult,
+    ok: Boolean(serpResult.ok || productPageSource),
+    sources: mergedSources,
+    error: serpResult.ok || productPageSource ? undefined : serpResult.error
+  };
+}
+
 function localProductBrief({ product, goal, platform, audience }, sources) {
   const snippets = sources.map((source) => source.description).filter(Boolean);
   const productPhrase = product.toLowerCase();
@@ -2342,6 +2375,181 @@ async function completeProviderDiagnostic(input) {
   }
 }
 
+function providerRetryInput(input) {
+  return {
+    product: input.product,
+    productUrl: input.productUrl || undefined,
+    goal: input.goal,
+    platform: input.platform,
+    audience: input.audience,
+    budget: input.budget,
+    geography: input.geography || undefined,
+    deliverable: input.deliverable || undefined,
+    timing: input.timing || undefined,
+    creatorCriteria: input.creatorCriteria || undefined,
+    researchSessionId: input.researchSessionId,
+    conversationId: input.conversationId || undefined,
+    organizationId: input.organizationId
+  };
+}
+
+async function scheduleProviderRetry({ request, input, providerJob, operation, workspacePersistence }) {
+  const user = request.creatorSignalAuth?.user;
+  if (!user || !input.organizationId || !input.researchSessionId || !workspacePersistence?.saved) return null;
+  if (!workspaceIntegrationStatus().persistenceConfigured || !await userCanManageOrganization(user.id, input.organizationId)) return null;
+  try {
+    return await createProviderRetry({
+      organizationId: input.organizationId,
+      userId: user.id,
+      researchRunId: input.researchSessionId,
+      providerJobId: providerJob?.id || null,
+      operation,
+      payload: { input: providerRetryInput(input) },
+      maxAttempts: Math.max(1, Math.min(5, Number(process.env.PROVIDER_RETRY_MAX_ATTEMPTS || 3)))
+    });
+  } catch (error) {
+    console.error("Provider retry scheduling failed", error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+function mergeProductEvidence(...groups) {
+  const merged = new Map();
+  for (const source of groups.flat().filter(Boolean)) {
+    const key = source.link || source.title;
+    if (!key || merged.has(key)) continue;
+    merged.set(key, { ...source, rank: merged.size + 1 });
+  }
+  return [...merged.values()];
+}
+
+async function persistRecoveredResearch({ retry, input, productSources, influencers, productBrief }) {
+  const saved = await loadResearchFromWorkspace({
+    organizationId: retry.org_id,
+    researchRunId: retry.research_run_id
+  });
+  const snapshot = upsertResearchSession({
+    id: retry.research_run_id,
+    ownerKey: `user:${retry.requested_by}`,
+    input,
+    productSources: mergeProductEvidence(saved?.productSources || [], productSources || []),
+    influencers: influencers ?? saved?.influencers ?? []
+  });
+  await persistResearchSnapshot({
+    userId: retry.requested_by,
+    organizationId: retry.org_id,
+    snapshot,
+    productBrief: productBrief || saved?.productBrief || undefined
+  });
+  if (input.conversationId) {
+    await linkConversationToResearch({
+      userId: retry.requested_by,
+      organizationId: retry.org_id,
+      conversationId: input.conversationId,
+      researchRunId: retry.research_run_id,
+      product: input.product
+    });
+  }
+  return snapshot;
+}
+
+async function executeProviderRetry(retry) {
+  const parsed = ResearchScopedProductRequest.safeParse(retry?.payload?.input);
+  if (!parsed.success) throw new Error("The saved retry input is invalid.");
+  const input = parsed.data;
+  if (input.organizationId !== retry.org_id || input.researchSessionId !== retry.research_run_id) {
+    throw new Error("The saved retry scope does not match its workspace research.");
+  }
+  if (!await userCanManageOrganization(retry.requested_by, retry.org_id)) {
+    throw new Error("The requesting workspace role can no longer update this research.");
+  }
+
+  const diagnostic = await beginProviderDiagnostic({
+    organizationId: retry.org_id,
+    userId: retry.requested_by,
+    researchRunId: retry.research_run_id,
+    provider: "bright_data",
+    operation: `${retry.operation}_retry`,
+    metadata: { retryJobId: retry.id, attempt: retry.attempt_count }
+  });
+
+  try {
+    if (retry.operation === "creator_discovery") {
+      const discovery = await discoverRealInfluencers(input);
+      if (!discovery.brightDataUsed) throw new Error(discovery.caveat || "Bright Data creator discovery remains unavailable.");
+      const snapshot = await persistRecoveredResearch({
+        retry,
+        input,
+        productSources: discovery.productSources,
+        influencers: discovery.candidates
+      });
+      await completeProviderDiagnostic({
+        job: diagnostic,
+        status: "complete",
+        sourceCount: discovery.sources.length,
+        metadata: { retryJobId: retry.id, attempt: retry.attempt_count, creatorCount: discovery.candidates.length }
+      });
+      return {
+        researchRunId: snapshot.id,
+        creatorCount: discovery.candidates.length,
+        sourceCount: discovery.sources.length,
+        recoveredAt: new Date().toISOString()
+      };
+    }
+
+    if (retry.operation === "product_research") {
+      const brightDataResult = await collectProductEvidence(input);
+      if (!brightDataResult.ok) throw new Error(brightDataResult.error || "Bright Data product research remains unavailable.");
+      const agentResult = await buildAgentBrief(input, brightDataResult);
+      const snapshot = await persistRecoveredResearch({
+        retry,
+        input,
+        productSources: brightDataResult.sources,
+        productBrief: agentResult.brief
+      });
+      await completeProviderDiagnostic({
+        job: diagnostic,
+        status: "complete",
+        sourceCount: brightDataResult.sources.length,
+        metadata: { retryJobId: retry.id, attempt: retry.attempt_count }
+      });
+      return {
+        researchRunId: snapshot.id,
+        productSourceCount: brightDataResult.sources.length,
+        sourceCount: snapshot.sourceCount,
+        recoveredAt: new Date().toISOString()
+      };
+    }
+
+    throw new Error("That provider retry operation is not supported.");
+  } catch (error) {
+    await completeProviderDiagnostic({
+      job: diagnostic,
+      status: "failed",
+      sourceCount: 0,
+      errorCategory: "provider_unavailable",
+      errorSummary: error instanceof Error ? error.message : "Provider retry failed.",
+      metadata: { retryJobId: retry.id, attempt: retry.attempt_count }
+    });
+    throw error;
+  }
+}
+
+const providerRetryWorker = createProviderRetryWorker({
+  readMessages: readProviderRetryMessages,
+  claimRetry: claimProviderRetry,
+  runRetry: executeProviderRetry,
+  completeRetry: completeProviderRetry,
+  failRetry: failProviderRetry,
+  archiveMessage: archiveProviderRetryMessage,
+  onError: (error) => console.error("Provider retry worker failed", error instanceof Error ? error.message : error),
+  intervalMs: Math.max(500, Number(process.env.PROVIDER_RETRY_POLL_MS || 1500)),
+  visibilitySeconds: Math.max(60, Number(process.env.PROVIDER_RETRY_VISIBILITY_SECONDS || 180)),
+  batchSize: Math.max(1, Math.min(5, Number(process.env.PROVIDER_RETRY_BATCH_SIZE || 2))),
+  retryBaseSeconds: Math.max(1, Number(process.env.PROVIDER_RETRY_BASE_DELAY_SECONDS || 5)),
+  retryMaximumSeconds: Math.max(30, Number(process.env.PROVIDER_RETRY_MAX_DELAY_SECONDS || 300))
+});
+
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true, service: "creator-signal-api" });
 });
@@ -2376,6 +2584,44 @@ app.get("/api/integrations/status", (_request, response) => {
   });
 });
 
+app.get("/api/provider-retries/:retryId", async (request, response) => {
+  const parsed = z.object({
+    retryId: z.string().uuid(),
+    organizationId: z.string().uuid()
+  }).safeParse({
+    retryId: request.params.retryId,
+    organizationId: request.query.organizationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid provider recovery job." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to view provider recovery status." });
+    return;
+  }
+  if (!await userCanAccessOrganization(user.id, parsed.data.organizationId)) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  try {
+    const retry = await loadProviderRetry({
+      organizationId: parsed.data.organizationId,
+      retryId: parsed.data.retryId,
+      userId: user.id
+    });
+    if (!retry) {
+      response.status(404).json({ error: "That provider recovery job was not found." });
+      return;
+    }
+    response.json({ retry });
+  } catch (error) {
+    console.error("Provider retry status failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "Provider recovery status is temporarily unavailable." });
+  }
+});
+
 app.post("/api/product-intelligence", async (request, response) => {
   const parsed = ResearchScopedProductRequest.safeParse(request.body);
   if (!parsed.success) {
@@ -2395,28 +2641,7 @@ app.post("/api/product-intelligence", async (request, response) => {
     operation: "product_research",
     metadata: { product: input.product }
   });
-  const [serpResult, productPageSource] = await Promise.all([
-    fetchBrightDataSerp(input).catch((error) => ({
-      ok: false,
-      sources: [],
-      error: error instanceof Error ? error.message : "Bright Data request failed."
-    })),
-    fetchBrightDataProductPageSource(input.productUrl).catch(() => null)
-  ]);
-  const mergedSources = [];
-  const seenSources = new Set();
-  for (const source of [productPageSource, ...(serpResult.sources || [])].filter(Boolean)) {
-    const key = source.link || source.title;
-    if (!key || seenSources.has(key)) continue;
-    seenSources.add(key);
-    mergedSources.push({ ...source, rank: mergedSources.length + 1 });
-  }
-  const brightDataResult = {
-    ...serpResult,
-    ok: Boolean(serpResult.ok || productPageSource),
-    sources: mergedSources,
-    error: serpResult.ok || productPageSource ? undefined : serpResult.error
-  };
+  const brightDataResult = await collectProductEvidence(input);
   await completeProviderDiagnostic({
     job: brightDataJob,
     status: brightDataResult.ok ? "complete" : "degraded",
@@ -2454,6 +2679,13 @@ app.post("/api/product-intelligence", async (request, response) => {
   });
   if (!researchSession) return;
   const workspacePersistence = await persistWorkspaceResearch(request, { ...input, researchSessionId: researchSession.id }, agentResult.brief);
+  const providerRetry = brightDataResult.ok ? null : await scheduleProviderRetry({
+    request,
+    input: { ...input, researchSessionId: researchSession.id },
+    providerJob: brightDataJob,
+    operation: "product_research",
+    workspacePersistence
+  });
 
   response.json({
     product: input.product,
@@ -2470,6 +2702,7 @@ app.post("/api/product-intelligence", async (request, response) => {
     brief: agentResult.brief,
     researchSession: clientResearchSession(researchSession, input.conversationId),
     workspacePersistence,
+    providerRetry,
     disclaimer:
       "Product research may come from live public web results. Verify creator-specific analytics, rates, and availability before committing budget."
   });
@@ -2608,6 +2841,13 @@ app.post("/api/real-influencers", async (request, response) => {
       workspaceSaved: workspacePersistence.saved
     }
   });
+  const providerRetry = discovery.brightDataUsed ? null : await scheduleProviderRetry({
+    request,
+    input: { ...input, researchSessionId: researchSession.id },
+    providerJob,
+    operation: "creator_discovery",
+    workspacePersistence
+  });
   response.json({
     product: input.product,
     brightData: {
@@ -2622,6 +2862,7 @@ app.post("/api/real-influencers", async (request, response) => {
     influencers: discovery.candidates,
     researchSession: clientResearchSession(researchSession, input.conversationId),
     workspacePersistence,
+    providerRetry,
     caveat: discovery.caveat,
     disclaimer:
       "These are real public web results discovered via Bright Data. Metrics are shown only when visible in source text; no private analytics or contact data is inferred."
@@ -4188,6 +4429,18 @@ app.get("/api/workspace/research/:researchRunId", async (request, response) => {
   }
 });
 
-app.listen(port, "127.0.0.1", () => {
+const server = app.listen(port, "127.0.0.1", () => {
   console.log(`CreatorSignal API listening on http://127.0.0.1:${port}`);
+  if (workspaceIntegrationStatus().persistenceConfigured && process.env.PROVIDER_RETRY_WORKER_ENABLED !== "false") {
+    providerRetryWorker.start();
+    console.log("Provider retry worker started");
+  }
 });
+
+const stopServer = () => {
+  providerRetryWorker.stop();
+  server.close(() => process.exit(0));
+};
+
+process.once("SIGINT", stopServer);
+process.once("SIGTERM", stopServer);

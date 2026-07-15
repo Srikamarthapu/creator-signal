@@ -21,6 +21,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { AuthScreen } from "./components/AuthScreen";
 import { useAuth } from "./components/AuthProvider";
 import { CampaignCopilot } from "./components/CampaignCopilot";
@@ -791,6 +792,24 @@ export default function App() {
             saveRealInfluencer={(influencer) => void saveRealInfluencer(influencer)}
             shortlistedUrls={shortlistedUrls}
             shortlistSavingUrl={shortlistSavingUrl}
+            agentPanel={(
+              <CampaignCopilot
+                variant="embedded"
+                session={researchSession}
+                initialMessages={restoredAgentMessages}
+                product={searchState.product || formState.product || "this product"}
+                configured={Boolean(integrationStatus?.campaignAgent?.configured)}
+                navigate={navigate}
+                currentSearch={formState}
+                onStartSearch={startAgentResearch}
+                onCreatorSaved={(sourceUrl, creatorName) => {
+                  setShortlistedUrls((current) => new Set(current).add(sourceUrl));
+                  setSaveMessage(`${creatorName} was saved to your workspace shortlist.`);
+                }}
+                researchLoading={realInfluencersLoading}
+                researchError={realInfluencersError}
+              />
+            )}
           />
         ) : null}
 
@@ -867,7 +886,7 @@ export default function App() {
         />
       ) : null}
 
-      {path === "/" || resultsVisible ? (
+      {path === "/" ? (
         <CampaignCopilot
           session={researchSession}
           initialMessages={restoredAgentMessages}
@@ -1196,7 +1215,8 @@ function ResultsScreen({
   openRealOutreach,
   saveRealInfluencer,
   shortlistedUrls,
-  shortlistSavingUrl
+  shortlistSavingUrl,
+  agentPanel
 }: {
   searchState: SearchState;
   formState: SearchState;
@@ -1231,6 +1251,7 @@ function ResultsScreen({
   saveRealInfluencer: (influencer: RealInfluencer) => void;
   shortlistedUrls: Set<string>;
   shortlistSavingUrl: string;
+  agentPanel: ReactNode;
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const showRealResults = realInfluencers.length > 0;
@@ -1526,12 +1547,15 @@ function ResultsScreen({
         ) : null}
       </div>
 
-      <ProductIntelligencePanel
-        intelligence={intelligence}
-        loading={intelligenceLoading}
-        error={intelligenceError}
-        refresh={refreshIntelligence}
-      />
+      <div className="results-side-column">
+        {agentPanel}
+        <ProductIntelligencePanel
+          intelligence={intelligence}
+          loading={intelligenceLoading}
+          error={intelligenceError}
+          refresh={refreshIntelligence}
+        />
+      </div>
     </section>
   );
 }

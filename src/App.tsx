@@ -27,6 +27,7 @@ import { WorkspaceScreen } from "./components/WorkspaceScreen";
 import { apiFetch } from "./lib/api";
 import { agentThreadStorageKey, readLocal, storageKeys, writeLocal } from "./lib/storage";
 import type {
+  CampaignAgentMessage,
   CampaignRisk,
   InfluencerEvaluation,
   InfluencerEvaluationResponse,
@@ -280,6 +281,7 @@ export default function App() {
   const [realInfluencerEvaluationsError, setRealInfluencerEvaluationsError] = useState("");
   const [realOutreachInfluencer, setRealOutreachInfluencer] = useState<RealInfluencer | null>(null);
   const [researchSession, setResearchSession] = useState<ResearchSessionMeta | null>(null);
+  const [restoredAgentMessages, setRestoredAgentMessages] = useState<CampaignAgentMessage[]>([]);
   const [shortlistedUrls, setShortlistedUrls] = useState<Set<string>>(() => new Set());
   const [shortlistSavingUrl, setShortlistSavingUrl] = useState("");
   const [resumeLoading, setResumeLoading] = useState(false);
@@ -386,6 +388,7 @@ export default function App() {
         setIntelligenceError("");
         setShortlistedUrls(new Set());
         writeLocal(agentThreadStorageKey(saved.researchSession.id), saved.messages.slice(-30));
+        setRestoredAgentMessages(saved.messages.slice(-30));
         setResearchSession(saved.researchSession);
         window.history.replaceState({}, "", "/results");
         setPath("/results");
@@ -419,7 +422,7 @@ export default function App() {
     });
   };
 
-  const requestIntelligence = async (nextSearch: SearchState, researchSessionId: string) => {
+  const requestIntelligence = async (nextSearch: SearchState, researchSessionId: string, conversationId?: string) => {
     setIntelligenceLoading(true);
     setIntelligenceError("");
     setIntelligence(null);
@@ -435,6 +438,7 @@ export default function App() {
           budget: nextSearch.budget,
           creatorCriteria: nextSearch.creatorCriteria,
           researchSessionId,
+          conversationId,
           organizationId: auth.activeOrganization?.id
         })
       });
@@ -483,7 +487,7 @@ export default function App() {
     }
   };
 
-  const requestRealInfluencers = async (nextSearch: SearchState, researchSessionId: string) => {
+  const requestRealInfluencers = async (nextSearch: SearchState, researchSessionId: string, conversationId?: string) => {
     setRealInfluencersLoading(true);
     setRealInfluencersError("");
     setRealInfluencers([]);
@@ -503,6 +507,7 @@ export default function App() {
           budget: nextSearch.budget,
           creatorCriteria: nextSearch.creatorCriteria,
           researchSessionId,
+          conversationId,
           organizationId: auth.activeOrganization?.id
         })
       });
@@ -519,15 +524,16 @@ export default function App() {
     }
   };
 
-  const startResearch = (nextSearch: SearchState, researchSessionId = newResearchSessionId()) => {
+  const startResearch = (nextSearch: SearchState, researchSessionId = newResearchSessionId(), conversationId?: string) => {
+    if (!conversationId) setRestoredAgentMessages([]);
     setResearchSession(null);
     setShortlistedUrls(new Set());
-    void requestRealInfluencers(nextSearch, researchSessionId);
-    void requestIntelligence(nextSearch, researchSessionId);
+    void requestRealInfluencers(nextSearch, researchSessionId, conversationId);
+    void requestIntelligence(nextSearch, researchSessionId, conversationId);
     return researchSessionId;
   };
 
-  const startAgentResearch = (nextSearch: SearchState, researchSessionId: string) => {
+  const startAgentResearch = (nextSearch: SearchState, researchSessionId: string, conversationId: string) => {
     const normalizedSearch = { ...nextSearch, product: nextSearch.product.trim() };
     setValidationError("");
     setSortMode("match");
@@ -540,7 +546,7 @@ export default function App() {
     setSearchState(normalizedSearch);
     persist(storageKeys.lastSearch, normalizedSearch);
     if (path !== "/results") navigate("/results");
-    startResearch(normalizedSearch, researchSessionId);
+    startResearch(normalizedSearch, researchSessionId, conversationId);
   };
 
   const saveRealInfluencer = async (influencer: RealInfluencer) => {
@@ -664,7 +670,7 @@ export default function App() {
             refreshIntelligence={() => {
               const researchSessionId = researchSession?.id || newResearchSessionId();
               if (!researchSession) setResearchSession(null);
-              void requestIntelligence(searchState, researchSessionId);
+              void requestIntelligence(searchState, researchSessionId, researchSession?.conversationId);
             }}
             realInfluencers={realInfluencers}
             realInfluencersLoading={realInfluencersLoading}
@@ -673,7 +679,7 @@ export default function App() {
             realInfluencerEvaluations={realInfluencerEvaluations}
             realInfluencerEvaluationsLoading={realInfluencerEvaluationsLoading}
             realInfluencerEvaluationsError={realInfluencerEvaluationsError}
-            refreshRealInfluencers={() => startResearch(searchState)}
+            refreshRealInfluencers={() => startResearch(searchState, newResearchSessionId(), researchSession?.conversationId)}
             openRealOutreach={(influencer) => setRealOutreachInfluencer(influencer)}
             saveRealInfluencer={(influencer) => void saveRealInfluencer(influencer)}
             shortlistedUrls={shortlistedUrls}
@@ -757,6 +763,7 @@ export default function App() {
       {path === "/" || path === "/results" ? (
         <CampaignCopilot
           session={researchSession}
+          initialMessages={restoredAgentMessages}
           product={searchState.product || formState.product || "this product"}
           configured={Boolean(integrationStatus?.campaignAgent?.configured)}
           navigate={navigate}

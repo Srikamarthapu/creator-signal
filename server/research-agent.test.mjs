@@ -61,6 +61,47 @@ test("discovery planner asks for the product when no usable search exists", asyn
   assert.match(result.answer, /product|service|category/i);
 });
 
+test("generic product-launch prompt asks for the actual product instead of searching a placeholder", async () => {
+  const result = await planCreatorDiscovery({
+    messages: [{ role: "user", content: "Find creators for a product launch." }],
+    currentSearch: { ...input, product: "" },
+    nvidia: {}
+  });
+
+  assert.equal(result.action, "clarify");
+  assert.equal(result.searchPlan, null);
+  assert.match(result.answer, /product|service|category/i);
+});
+
+test("deterministic discovery asks one strategic question before launching a product-only search", async () => {
+  const firstTurn = [{ role: "user", content: "Find creators for an ergonomic mouse." }];
+  const first = await planCreatorDiscovery({
+    messages: firstTurn,
+    currentSearch: { ...input, product: "" },
+    nvidia: {}
+  });
+
+  assert.equal(first.action, "clarify");
+  assert.equal(first.searchPlan, null);
+  assert.match(first.answer, /who should the creator reach/i);
+
+  const second = await planCreatorDiscovery({
+    messages: [
+      ...firstTurn,
+      { role: "assistant", content: first.answer },
+      { role: "user", content: "Remote professionals; drive sales; YouTube reviews." }
+    ],
+    currentSearch: { ...input, product: "" },
+    nvidia: {}
+  });
+
+  assert.equal(second.action, "search");
+  assert.equal(second.searchPlan.product, "ergonomic mouse");
+  assert.equal(second.searchPlan.goal, "Sales");
+  assert.equal(second.searchPlan.platform, "YouTube");
+  assert.match(second.searchPlan.creatorCriteria, /remote professionals|youtube reviews/i);
+});
+
 test("GLM discovery uses the bounded find tool and returns only a search plan", async () => {
   let requestBody;
   const result = await planCreatorDiscovery({
@@ -125,6 +166,67 @@ test("source-only fallback cites only records in the research session", async ()
   assert.equal(result.citations.length, 1);
   assert.equal(result.citations[0].url, influencer.sourceUrl);
   assert.match(result.answer, /\[E1\]/);
+});
+
+test("rate-limited source-only fallback ranks direct brief fit instead of raw source score", async () => {
+  const session = upsertResearchSession({
+    id: "2d378407-cc58-48f7-b6eb-d32d66ff5c01",
+    input: {
+      product: "ergonomic wireless mouse",
+      goal: "Product launch",
+      platform: "YouTube",
+      audience: "Remote professionals",
+      creatorCriteria: "Review-led content and desk setup relevance"
+    },
+    influencerSources: [],
+    influencers: [{
+      ...influencer,
+      displayName: "Guide Realm",
+      handle: "guiderealm",
+      platform: "YouTube",
+      sourceUrl: "https://www.youtube.com/watch?v=guide",
+      sourceTitle: "How to connect a wireless mouse - full guide",
+      sourceDescription: "A public how-to search result.",
+      matchScore: 99
+    }, {
+      ...influencer,
+      displayName: "Kova Tech",
+      handle: "kovatech",
+      platform: "YouTube",
+      sourceUrl: "https://www.youtube.com/watch?v=gaming",
+      sourceTitle: "Best gaming mouse review",
+      sourceDescription: "A public gaming mouse review result.",
+      matchScore: 98
+    }, {
+      ...influencer,
+      displayName: "Mobile Reviews Eh",
+      handle: "mobilereviewseh",
+      platform: "YouTube",
+      sourceUrl: "https://www.youtube.com/watch?v=ergonomic",
+      sourceTitle: "I spent four months testing vertical ergonomic mice",
+      sourceDescription: "A public long-term ergonomic mouse testing result.",
+      matchScore: 60
+    }]
+  });
+
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Who are the strongest fits and why?" }],
+    nvidia: { apiKey: "test", baseUrl: "https://example.test/v1" },
+    fetchImpl: async () => new Response(JSON.stringify({ error: { message: "You exceeded quota", private_detail: "do-not-show" } }), {
+      status: 429,
+      headers: { "Content-Type": "application/json" }
+    })
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.providerUsed, false);
+  assert.equal(result.citations[0].creatorName, "Mobile Reviews Eh");
+  assert.match(result.answer, /1\. Mobile Reviews Eh/);
+  assert.match(result.answer, /\[E3\]/);
+  assert.ok(result.citations.every((citation) => citation.url.startsWith("https://www.youtube.com/")));
+  assert.match(result.note, /temporarily rate limited/i);
+  assert.doesNotMatch(result.note, /429|do-not-show|exceeded quota/i);
 });
 
 test("out-of-scope questions are refused without calling the model", async () => {

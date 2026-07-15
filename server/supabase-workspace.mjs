@@ -270,48 +270,112 @@ function deterministicUuid(value) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export async function persistAgentExchange({ userId, organizationId, snapshot, userMessage, agentResult }) {
-  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
-  await persistResearchSnapshot({ userId, organizationId, snapshot });
-  const requestMessageId = userMessage.id || crypto.randomUUID();
-  const assistantMessageId = deterministicUuid(`${snapshot.id}:${requestMessageId}:assistant`);
+function campaignConversationTitle(product) {
+  const value = String(product || "").trim().replace(/\s+/g, " ");
+  return value ? `${value.slice(0, 130)} creator campaign` : "Creator discovery campaign";
+}
 
-  throwOnError(await workspaceAdmin.from("conversations").upsert({
-    id: snapshot.id,
-    org_id: organizationId,
-    research_run_id: snapshot.id,
-    title: `${snapshot.input.product} campaign copilot`,
-    created_by: userId
-  }, { onConflict: "id" }), "Save conversation");
+async function ensureConversation({ userId, organizationId, conversationId, researchRunId, title }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  const existing = throwOnError(await workspaceAdmin
+    .from("conversations")
+    .select("id, org_id, research_run_id, created_by")
+    .eq("id", conversationId)
+    .maybeSingle(), "Check conversation ownership");
+
+  if (existing && existing.org_id !== organizationId) {
+    throw new Error("Conversation identifier already belongs to another organization.");
+  }
+
+  if (existing) {
+    const updates = { title: campaignConversationTitle(title) };
+    if (researchRunId) updates.research_run_id = researchRunId;
+    throwOnError(await workspaceAdmin
+      .from("conversations")
+      .update(updates)
+      .eq("org_id", organizationId)
+      .eq("id", conversationId), "Update conversation");
+  } else {
+    throwOnError(await workspaceAdmin.from("conversations").insert({
+      id: conversationId,
+      org_id: organizationId,
+      research_run_id: researchRunId || null,
+      title: campaignConversationTitle(title),
+      created_by: userId
+    }), "Create conversation");
+  }
+
+  if (researchRunId) {
+    throwOnError(await workspaceAdmin.from("conversation_research_runs").upsert({
+      org_id: organizationId,
+      conversation_id: conversationId,
+      research_run_id: researchRunId,
+      linked_by: userId,
+      linked_at: new Date().toISOString()
+    }, { onConflict: "conversation_id,research_run_id" }), "Link conversation research");
+  }
+
+  return conversationId;
+}
+
+async function assertMessageOwnership({ organizationId, conversationId, messageId }) {
+  const existing = throwOnError(await workspaceAdmin
+    .from("conversation_messages")
+    .select("id, org_id, conversation_id")
+    .eq("id", messageId)
+    .maybeSingle(), "Check conversation message ownership");
+  if (existing && (existing.org_id !== organizationId || existing.conversation_id !== conversationId)) {
+    throw new Error("Conversation message identifier already belongs to another thread.");
+  }
+}
+
+async function persistConversationExchange({
+  userId,
+  organizationId,
+  conversationId,
+  userMessage,
+  agentResult,
+  provider,
+  toolOutput = {}
+}) {
+  const requestMessageId = userMessage.id || crypto.randomUUID();
+  const assistantMessageId = deterministicUuid(`${conversationId}:${requestMessageId}:assistant`);
+  const exchangeStartedAt = Date.now();
+  await Promise.all([
+    assertMessageOwnership({ organizationId, conversationId, messageId: requestMessageId }),
+    assertMessageOwnership({ organizationId, conversationId, messageId: assistantMessageId })
+  ]);
 
   throwOnError(await workspaceAdmin.from("conversation_messages").upsert([{
     id: requestMessageId,
     org_id: organizationId,
-    conversation_id: snapshot.id,
+    conversation_id: conversationId,
     author_user_id: userId,
     role: "user",
     content: userMessage.content,
-    citations: []
+    citations: [],
+    created_at: new Date(exchangeStartedAt).toISOString()
   }, {
     id: assistantMessageId,
     org_id: organizationId,
-    conversation_id: snapshot.id,
+    conversation_id: conversationId,
     author_user_id: null,
     role: "assistant",
     content: agentResult.answer,
-    citations: agentResult.citations,
-    model: agentResult.model
+    citations: agentResult.citations || [],
+    model: agentResult.model,
+    created_at: new Date(exchangeStartedAt + 1).toISOString()
   }], { onConflict: "id" }), "Save conversation messages");
 
   const runData = throwOnError(await workspaceAdmin.from("agent_runs").upsert({
     org_id: organizationId,
-    conversation_id: snapshot.id,
+    conversation_id: conversationId,
     requested_by: userId,
     request_message_id: requestMessageId,
     model: agentResult.model,
-    provider: agentResult.providerUsed ? "nvidia" : "source_retrieval",
+    provider,
     status: agentResult.providerUsed ? "complete" : "degraded",
-    source_count: agentResult.citations.length,
+    source_count: agentResult.citations?.length || 0,
     completed_at: new Date().toISOString()
   }, { onConflict: "conversation_id,request_message_id" }).select("id").single(), "Save agent run");
 
@@ -321,15 +385,251 @@ export async function persistAgentExchange({ userId, organizationId, snapshot, u
       org_id: organizationId,
       agent_run_id: runData.id,
       tool_name: tool.name,
-      output_summary: { label: tool.label },
+      input_summary: toolOutput.input || {},
+      output_summary: { label: tool.label, ...(toolOutput.output || {}) },
       status: "complete"
     }))), "Save tool trace");
   }
-  return { conversationId: snapshot.id, userMessageId: requestMessageId, assistantMessageId };
+  throwOnError(await workspaceAdmin
+    .from("conversations")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("org_id", organizationId)
+    .eq("id", conversationId), "Touch conversation");
+  return { conversationId, userMessageId: requestMessageId, assistantMessageId, agentRunId: runData.id };
+}
+
+export async function persistDiscoveryExchange({
+  userId,
+  organizationId,
+  conversationId,
+  currentSearch,
+  userMessage,
+  agentResult
+}) {
+  const search = agentResult.searchPlan || currentSearch || {};
+  await ensureConversation({
+    userId,
+    organizationId,
+    conversationId,
+    title: search.product
+  });
+  return persistConversationExchange({
+    userId,
+    organizationId,
+    conversationId,
+    userMessage,
+    agentResult,
+    provider: agentResult.providerUsed ? "nvidia" : "deterministic_planner",
+    toolOutput: {
+      input: { grounding: "customer_requirements" },
+      output: {
+        action: agentResult.action,
+        search_plan: agentResult.searchPlan || null
+      }
+    }
+  });
+}
+
+export async function linkConversationToResearch({
+  userId,
+  organizationId,
+  conversationId,
+  researchRunId,
+  product
+}) {
+  return ensureConversation({
+    userId,
+    organizationId,
+    conversationId,
+    researchRunId,
+    title: product
+  });
+}
+
+export async function persistDiscoveryCompletion({
+  userId,
+  organizationId,
+  conversationId,
+  snapshot
+}) {
+  await ensureConversation({
+    userId,
+    organizationId,
+    conversationId,
+    researchRunId: snapshot.id,
+    title: snapshot.input.product
+  });
+  const messageId = deterministicUuid(`${conversationId}:${snapshot.id}:discovery-complete`);
+  await assertMessageOwnership({ organizationId, conversationId, messageId });
+  const creatorCount = snapshot.creatorCount || 0;
+  const sourceCount = snapshot.sourceCount || 0;
+  const content = creatorCount
+    ? `I found ${creatorCount} source-backed creator candidate${creatorCount === 1 ? "" : "s"}. I can now compare their evidence, surface risks, and help you choose the strongest fit.`
+    : "The live search finished without enough usable public creator evidence. Refine the platform, niche, geography, or content format before trying again.";
+  throwOnError(await workspaceAdmin.from("conversation_messages").upsert({
+    id: messageId,
+    org_id: organizationId,
+    conversation_id: conversationId,
+    author_user_id: null,
+    role: "assistant",
+    content,
+    citations: [],
+    model: null
+  }, { onConflict: "id" }), "Save discovery completion");
+
+  const recentRuns = throwOnError(await workspaceAdmin
+    .from("agent_runs")
+    .select("id")
+    .eq("org_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .order("started_at", { ascending: false })
+    .limit(10), "Find discovery agent run") || [];
+  if (recentRuns.length) {
+    const toolCall = throwOnError(await workspaceAdmin
+      .from("agent_tool_calls")
+      .select("id")
+      .eq("org_id", organizationId)
+      .in("agent_run_id", recentRuns.map((run) => run.id))
+      .eq("tool_name", "find_creators")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(), "Find discovery tool call");
+    if (toolCall) {
+      throwOnError(await workspaceAdmin.from("agent_tool_calls").update({
+        output_summary: {
+          label: creatorCount
+            ? `Bright Data returned ${creatorCount} source-backed creator candidates`
+            : "Bright Data returned no usable creator candidates",
+          provider: "bright_data",
+          research_run_id: snapshot.id,
+          source_count: sourceCount,
+          creator_count: creatorCount
+        },
+        status: "complete"
+      }).eq("id", toolCall.id), "Complete discovery tool trace");
+    }
+  }
+  throwOnError(await workspaceAdmin
+    .from("conversations")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("org_id", organizationId)
+    .eq("id", conversationId), "Touch completed discovery conversation");
+  return { conversationId, assistantMessageId: messageId };
+}
+
+export async function persistAgentExchange({ userId, organizationId, conversationId, snapshot, userMessage, agentResult }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  await persistResearchSnapshot({ userId, organizationId, snapshot });
+  const activeConversationId = conversationId || snapshot.id;
+  await ensureConversation({
+    userId,
+    organizationId,
+    conversationId: activeConversationId,
+    researchRunId: snapshot.id,
+    title: snapshot.input.product
+  });
+  return persistConversationExchange({
+    userId,
+    organizationId,
+    conversationId: activeConversationId,
+    userMessage,
+    agentResult,
+    provider: agentResult.providerUsed ? "nvidia" : "source_retrieval"
+  });
 }
 
 function toClientSourceType(value) {
   return value === "search_result" ? "searchResult" : value;
+}
+
+async function loadConversationTranscript({ organizationId, conversationId }) {
+  if (!conversationId) return [];
+  const [messages, agentRuns] = await Promise.all([
+    workspaceAdmin
+      .from("conversation_messages")
+      .select("id, role, content, citations, model, created_at")
+      .eq("org_id", organizationId)
+      .eq("conversation_id", conversationId)
+      .in("role", ["user", "assistant"])
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(100),
+    workspaceAdmin
+      .from("agent_runs")
+      .select("id, request_message_id, model, provider, status, source_count")
+      .eq("org_id", organizationId)
+      .eq("conversation_id", conversationId)
+      .order("started_at", { ascending: false })
+      .limit(100)
+  ]);
+  const messageRows = [...(throwOnError(messages, "Load conversation") || [])].reverse();
+  const agentRunRows = [...(throwOnError(agentRuns, "Load agent runs") || [])].reverse();
+  const runIds = agentRunRows.map((run) => run.id);
+  const toolRows = runIds.length
+    ? throwOnError(await workspaceAdmin
+        .from("agent_tool_calls")
+        .select("agent_run_id, tool_name, output_summary, status, created_at")
+        .eq("org_id", organizationId)
+        .in("agent_run_id", runIds)
+        .order("created_at", { ascending: true }), "Load agent tool traces") || []
+    : [];
+  const toolsByRun = new Map();
+  for (const tool of toolRows) {
+    const current = toolsByRun.get(tool.agent_run_id) || [];
+    current.push({
+      name: tool.tool_name,
+      label: tool.output_summary?.label || tool.tool_name,
+      status: tool.status
+    });
+    toolsByRun.set(tool.agent_run_id, current);
+  }
+  const runByRequestMessage = new Map(agentRunRows.map((run) => [run.request_message_id, run]));
+  let pendingRun = null;
+  return messageRows.map((message) => {
+    if (message.role === "user") {
+      pendingRun = runByRequestMessage.get(message.id) || null;
+      return {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        citations: [],
+        createdAt: message.created_at
+      };
+    }
+    const run = pendingRun;
+    pendingRun = null;
+    return {
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      citations: Array.isArray(message.citations) ? message.citations : [],
+      toolsUsed: run ? toolsByRun.get(run.id) || [] : [],
+      model: message.model || run?.model || undefined,
+      providerUsed: run ? run.provider === "nvidia" && run.status === "complete" : false,
+      note: run?.status === "degraded" ? "This turn used a structured fallback and remains source constrained." : undefined,
+      createdAt: message.created_at
+    };
+  });
+}
+
+export async function loadConversationFromWorkspace({ organizationId, conversationId }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  const conversation = throwOnError(await workspaceAdmin
+    .from("conversations")
+    .select("id, title, research_run_id, created_at, updated_at")
+    .eq("org_id", organizationId)
+    .eq("id", conversationId)
+    .maybeSingle(), "Load agent conversation");
+  if (!conversation) return null;
+  const messages = await loadConversationTranscript({ organizationId, conversationId });
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    researchRunId: conversation.research_run_id,
+    messages,
+    createdAt: conversation.created_at,
+    updatedAt: conversation.updated_at
+  };
 }
 
 export async function loadResearchFromWorkspace({ organizationId, researchRunId }) {
@@ -342,7 +642,28 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
     .maybeSingle(), "Load research run");
   if (!run) return null;
 
-  const [recommendations, evidenceSources, messages] = await Promise.all([
+  const conversationLink = throwOnError(await workspaceAdmin
+    .from("conversation_research_runs")
+    .select("conversation_id")
+    .eq("org_id", organizationId)
+    .eq("research_run_id", researchRunId)
+    .order("linked_at", { ascending: false })
+    .limit(1)
+    .maybeSingle(), "Load linked conversation");
+  let conversationId = conversationLink?.conversation_id || null;
+  if (!conversationId) {
+    const legacyConversation = throwOnError(await workspaceAdmin
+      .from("conversations")
+      .select("id")
+      .eq("org_id", organizationId)
+      .eq("research_run_id", researchRunId)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(), "Load legacy research conversation");
+    conversationId = legacyConversation?.id || null;
+  }
+
+  const [recommendations, evidenceSources, restoredMessages] = await Promise.all([
     workspaceAdmin
       .from("creator_recommendations")
       .select("id, creator_id, primary_evidence_id, rank, source_score, ai_score, confidence, match_reason, strengths, risks, recommended_use, model_snapshot")
@@ -354,17 +675,10 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
       .select("id, creator_id, provider, source_url, source_type, title, excerpt, confidence, observed_at, expires_at")
       .eq("org_id", organizationId)
       .eq("research_run_id", researchRunId),
-    workspaceAdmin
-      .from("conversation_messages")
-      .select("id, role, content, citations, model, created_at")
-      .eq("org_id", organizationId)
-      .eq("conversation_id", researchRunId)
-      .in("role", ["user", "assistant"])
-      .order("created_at", { ascending: true })
+    loadConversationTranscript({ organizationId, conversationId })
   ]);
   const recommendationRows = throwOnError(recommendations, "Load recommendations") || [];
   const sourceRows = throwOnError(evidenceSources, "Load evidence") || [];
-  const messageRows = throwOnError(messages, "Load conversation") || [];
   const creatorIds = [...new Set(recommendationRows.map((row) => row.creator_id).filter(Boolean))];
   const creatorRows = creatorIds.length
     ? throwOnError(await workspaceAdmin
@@ -412,20 +726,13 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
 
   return {
     id: run.id,
+    conversationId,
     input: run.search_input,
     filterState: run.filter_state,
     productBrief: run.product_brief,
     productSources,
     influencers,
-    messages: messageRows.map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content,
-      citations: Array.isArray(message.citations) ? message.citations : [],
-      model: message.model || undefined,
-      providerUsed: message.role === "assistant" ? message.model === "z-ai/glm-5.2" : undefined,
-      createdAt: message.created_at
-    }))
+    messages: restoredMessages
   };
 }
 

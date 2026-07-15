@@ -1,6 +1,9 @@
 import {
   Bot,
+  CheckCircle2,
   ClipboardCheck,
+  CloudOff,
+  CloudUpload,
   Database,
   ExternalLink,
   Loader2,
@@ -12,7 +15,7 @@ import {
   X
 } from "lucide-react";
 import { FormEvent, KeyboardEvent, lazy, Suspense, useEffect, useRef, useState } from "react";
-import { agentThreadStorageKey, readLocal, writeLocal } from "../lib/storage";
+import { activeAgentConversationStorageKey, agentThreadStorageKey, readLocal, writeLocal } from "../lib/storage";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "./AuthProvider";
 import type {
@@ -20,6 +23,7 @@ import type {
   CampaignAgentResponse,
   DiscoveryAgentResponse,
   ResearchSessionMeta,
+  SavedAgentConversationResponse,
   SearchState
 } from "../lib/types";
 
@@ -52,6 +56,7 @@ function storedMessages(sessionId: string) {
 
 export function CampaignCopilot({
   session,
+  initialMessages,
   product,
   configured,
   navigate,
@@ -61,11 +66,12 @@ export function CampaignCopilot({
   researchError
 }: {
   session: ResearchSessionMeta | null;
+  initialMessages: CampaignAgentMessage[];
   product: string;
   configured: boolean;
   navigate: (path: string) => void;
   currentSearch: SearchState;
-  onStartSearch: (search: SearchState, researchSessionId: string) => void;
+  onStartSearch: (search: SearchState, researchSessionId: string, conversationId: string) => void;
   researchLoading: boolean;
   researchError: string;
 }) {
@@ -77,12 +83,15 @@ export function CampaignCopilot({
   const [suggestions, setSuggestions] = useState(discoveryPrompts);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [memoryState, setMemoryState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [resumableResearchRunId, setResumableResearchRunId] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const pendingSearchIdRef = useRef("");
   const previousResearchLoadingRef = useRef(false);
+  const conversationIdRef = useRef(session?.conversationId || messageId());
 
   useEffect(() => {
     abortRef.current?.abort();
@@ -91,17 +100,60 @@ export function CampaignCopilot({
     setInput("");
     setView("chat");
     if (pendingSearchIdRef.current && (!session || session.id === pendingSearchIdRef.current)) {
-      if (session) setSuggestions(groundedPrompts);
+      if (session) {
+        conversationIdRef.current = session.conversationId || conversationIdRef.current;
+        setMemoryState(session.conversationId ? "saved" : "idle");
+        setSuggestions(groundedPrompts);
+      }
       return;
     }
+    conversationIdRef.current = session?.conversationId || (session ? session.id : messageId());
+    if (session) setResumableResearchRunId("");
+    setMemoryState(session?.conversationId ? "saved" : "idle");
     setSuggestions(session?.sourceCount && session.creatorCount ? groundedPrompts : discoveryPrompts);
-    setMessages(session ? storedMessages(session.id) : []);
-  }, [session?.id]);
+    setMessages(session ? (initialMessages.length ? initialMessages : storedMessages(session.id)) : []);
+  }, [session?.conversationId, session?.id]);
+
+  useEffect(() => {
+    if (session || !auth.user || !auth.activeOrganization) return;
+    const storageKey = activeAgentConversationStorageKey(auth.activeOrganization.id);
+    const savedConversationId = readLocal<string>(storageKey, "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(savedConversationId)) return;
+    let active = true;
+    setMemoryState("saving");
+    apiFetch(`/api/agent/conversations/${savedConversationId}?organizationId=${encodeURIComponent(auth.activeOrganization.id)}`)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(payload?.error || "The saved agent conversation could not be opened.");
+        return payload as SavedAgentConversationResponse;
+      })
+      .then((payload) => {
+        if (!active) return;
+        conversationIdRef.current = payload.conversation.id;
+        setMessages(payload.conversation.messages.slice(-30));
+        setResumableResearchRunId(payload.conversation.researchRunId || "");
+        setSuggestions(payload.conversation.researchRunId ? groundedPrompts : discoveryPrompts.slice(1));
+        setMemoryState("saved");
+      })
+      .catch(() => {
+        if (!active) return;
+        conversationIdRef.current = messageId();
+        setMemoryState("idle");
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.activeOrganization?.id, auth.user?.id, session?.id]);
 
   useEffect(() => {
     if (!session) return;
     writeLocal(agentThreadStorageKey(session.id), messages.slice(-30));
   }, [messages, session]);
+
+  useEffect(() => {
+    if (!session?.conversationId || !auth.activeOrganization) return;
+    writeLocal(activeAgentConversationStorageKey(auth.activeOrganization.id), session.conversationId);
+  }, [auth.activeOrganization?.id, session?.conversationId]);
 
   useEffect(() => {
     const openAgent = () => setOpen(true);
@@ -188,6 +240,12 @@ export function CampaignCopilot({
     setSuggestions(session?.sourceCount && session.creatorCount ? groundedPrompts : discoveryPrompts);
     setLoading(false);
     setError("");
+    setMemoryState("idle");
+    conversationIdRef.current = messageId();
+    setResumableResearchRunId("");
+    if (auth.activeOrganization) {
+      writeLocal(activeAgentConversationStorageKey(auth.activeOrganization.id), conversationIdRef.current);
+    }
     inputRef.current?.focus();
   };
 
@@ -210,6 +268,7 @@ export function CampaignCopilot({
     setInput("");
     setSuggestions([]);
     setLoading(true);
+    setMemoryState("saving");
     setError("");
 
     const controller = new AbortController();
@@ -224,6 +283,7 @@ export function CampaignCopilot({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             organizationId: auth.activeOrganization.id,
+            conversationId: conversationIdRef.current,
             currentSearch,
             messages: nextMessages.slice(-16).map((message) => ({
               id: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(message.id) ? message.id : undefined,
@@ -235,6 +295,9 @@ export function CampaignCopilot({
         const payload = await response.json().catch(() => null);
         if (!response.ok) throw new Error(payload?.error || "The discovery agent could not plan this search.");
         const data = payload as DiscoveryAgentResponse;
+        conversationIdRef.current = data.conversationId;
+        writeLocal(activeAgentConversationStorageKey(auth.activeOrganization.id), data.conversationId);
+        setMemoryState(data.workspacePersistence?.saved ? "saved" : "failed");
         const assistantMessage: CampaignAgentMessage = {
           id: messageId(),
           role: "assistant",
@@ -251,7 +314,7 @@ export function CampaignCopilot({
           pendingSearchIdRef.current = researchSessionId;
           previousResearchLoadingRef.current = false;
           setSuggestions([]);
-          onStartSearch(data.searchPlan, researchSessionId);
+          onStartSearch(data.searchPlan, researchSessionId, data.conversationId);
         } else {
           setSuggestions(discoveryPrompts.slice(1));
         }
@@ -264,6 +327,7 @@ export function CampaignCopilot({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           researchSessionId: session!.id,
+          conversationId: conversationIdRef.current,
           organizationId: auth.activeOrganization.id,
           messages: nextMessages.slice(-16).map((message) => ({
             id: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(message.id) ? message.id : undefined,
@@ -275,6 +339,11 @@ export function CampaignCopilot({
       const payload = await response.json().catch(() => null);
       if (!response.ok) throw new Error(payload?.error || "The campaign copilot could not answer this question.");
       const data = payload as CampaignAgentResponse;
+      writeLocal(
+        activeAgentConversationStorageKey(auth.activeOrganization.id),
+        data.workspacePersistence?.conversationId || conversationIdRef.current
+      );
+      setMemoryState(data.workspacePersistence?.saved ? "saved" : "failed");
       const assistantMessage: CampaignAgentMessage = {
         id: messageId(),
         role: "assistant",
@@ -290,6 +359,7 @@ export function CampaignCopilot({
       setSuggestions(data.suggestions.length ? data.suggestions : groundedPrompts.slice(0, 3));
     } catch (requestError) {
       if (requestError instanceof Error && requestError.name === "AbortError") return;
+      setMemoryState("failed");
       setError(requestError instanceof Error ? requestError.message : "The campaign copilot could not answer this question.");
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -363,6 +433,10 @@ export function CampaignCopilot({
               <span className={configured ? "copilot-provider-on" : ""}>
                 <Sparkles className="h-3.5 w-3.5" /> {configured ? "GLM 5.2 ready" : "Structured fallback"}
               </span>
+              <span className={`copilot-memory-state copilot-memory-${memoryState}`}>
+                {memoryState === "saving" ? <CloudUpload className="h-3.5 w-3.5" /> : memoryState === "failed" ? <CloudOff className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {memoryState === "saving" ? "Saving" : memoryState === "failed" ? "Not saved" : memoryState === "saved" ? "Memory saved" : "Ready to save"}
+              </span>
             </div>
 
             {ready ? <div className="copilot-view-tabs" role="tablist" aria-label="Creator discovery workspace">
@@ -409,6 +483,17 @@ export function CampaignCopilot({
                   >
                     {auth.user ? auth.workspaceLoading ? "Opening..." : "Reload workspace" : "Sign in"}
                   </button>
+                </div>
+              ) : null}
+
+              {!ready && resumableResearchRunId ? (
+                <div className="copilot-resume-memory">
+                  <Database className="h-5 w-5" />
+                  <div>
+                    <strong>Source-backed results are saved</strong>
+                    <p>Resume the linked Bright Data research before asking the agent to compare creators.</p>
+                  </div>
+                  <button type="button" onClick={() => navigate(`/research/${resumableResearchRunId}`)}>Resume</button>
                 </div>
               ) : null}
 

@@ -29,9 +29,11 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 - `/results` contains only real public web results returned through Bright Data discovery.
 - No local or generated creator profiles are used as fallback results.
 - The discovery agent can ask for missing campaign context and launch a real Bright Data search before any results exist.
+- Product-only requests receive one strategic intake question about audience, desired action, and credible creator-content format before discovery.
 - A requested TikTok, Instagram, or YouTube channel is enforced in both the live query and returned creator set.
 - Source match scores are ranking aids, not verified social-platform analytics.
 - The copilot can only retrieve evidence from its server-owned Bright Data research session.
+- Agent conversations, model runs, and bounded tool traces are saved before and after discovery, linked to the resulting research, and restored after refresh.
 - Saving a creator requires a signed-in workspace and persists the exact server-side source record.
 - Shortlists use role-separated review and approval before campaign conversion.
 - Campaign stages, tasks, outreach edits, and approval decisions append audit events.
@@ -52,7 +54,7 @@ supabase db reset
 pnpm test:db
 ```
 
-The database suite currently covers 120 tenant-isolation, role, invitation, account, campaign-brief, approval, task, campaign, outreach, entitlement, seat-limit, and provider-diagnostic assertions. Apply the migrations to a cloud project only after choosing the intended Supabase organization and environment.
+The database suite currently covers 134 tenant-isolation, role, invitation, account, durable-agent-memory, campaign-brief, approval, task, campaign, outreach, entitlement, seat-limit, and provider-diagnostic assertions. Apply the migrations to a cloud project only after choosing the intended Supabase organization and environment.
 
 Local team invitations are share links and do not send email. Connect reviewed SMTP or an email provider only when the hosted Supabase environment is configured.
 
@@ -62,7 +64,7 @@ Platform users with `app_metadata.platform_role` set to `operator` or `admin` ca
 
 ## Demo Path
 
-1. Choose **Plan with AI agent** and describe the product, audience, goal, platform, budget, and creator preferences.
+1. Choose **Plan with AI agent** and describe what you are promoting. The agent asks for the highest-value missing campaign context.
 2. Let the agent launch its `find_creators` tool and wait for the real Bright Data results.
 3. Ask the same agent to compare the strongest fits and inspect its cited source records.
 4. Open **Brief** to generate, edit, submit, and approve the structured campaign brief.

@@ -523,6 +523,18 @@
     color: #0f766e;
   }
 
+  .copilot-grounding-bar .copilot-memory-saved {
+    color: #0f766e;
+  }
+
+  .copilot-grounding-bar .copilot-memory-saving {
+    color: #6b5a2b;
+  }
+
+  .copilot-grounding-bar .copilot-memory-failed {
+    color: #b42318;
+  }
+
   .copilot-view-tabs {
     @apply grid shrink-0 grid-cols-2 border-b border-line bg-white px-3 pt-2;
   }
@@ -574,6 +586,26 @@
 
   .copilot-auth-gate .primary-button {
     @apply col-span-2 w-full;
+  }
+
+  .copilot-resume-memory {
+    @apply mt-4 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-line bg-mist p-3 text-muted;
+  }
+
+  .copilot-resume-memory > svg {
+    @apply text-signal-900;
+  }
+
+  .copilot-resume-memory strong {
+    @apply block text-sm font-semibold text-ink;
+  }
+
+  .copilot-resume-memory p {
+    @apply mt-0.5 text-xs leading-5;
+  }
+
+  .copilot-resume-memory button {
+    @apply min-h-9 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink transition-colors hover:border-signal-700 hover:text-signal-900;
   }
 
   .copilot-messages {

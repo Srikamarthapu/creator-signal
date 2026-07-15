@@ -1,6 +1,7 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
+import crypto from "node:crypto";
 import { Agent, run } from "@openai/agents";
 import { z } from "zod";
 import {
@@ -22,6 +23,7 @@ import {
   createWorkspaceInvitation,
   finishProviderJob,
   isPlatformOperator,
+  loadConversationFromWorkspace,
   loadCampaignBrief,
   loadCampaignFromWorkspace,
   loadSupportDashboard,
@@ -34,7 +36,10 @@ import {
   requestOwnerKey,
   saveCampaignBrief,
   persistAgentExchange,
+  persistDiscoveryCompletion,
+  persistDiscoveryExchange,
   persistResearchSnapshot,
+  linkConversationToResearch,
   revokeWorkspaceInvitation,
   saveCreatorFromResearch,
   setCampaignStatus,
@@ -91,6 +96,7 @@ const ProductIntelligenceRequest = z.object({
 
 const ResearchScopedProductRequest = ProductIntelligenceRequest.extend({
   researchSessionId: z.string().uuid().optional(),
+  conversationId: z.string().uuid().optional(),
   organizationId: z.string().uuid().optional()
 });
 
@@ -170,12 +176,14 @@ const AgentMessageInput = z.object({
 
 const AgentChatRequest = z.object({
   researchSessionId: z.string().uuid(),
+  conversationId: z.string().uuid().optional(),
   organizationId: z.string().uuid().optional(),
   messages: z.array(AgentMessageInput).min(1).max(20)
 });
 
 const AgentDiscoveryRequest = z.object({
   organizationId: z.string().uuid(),
+  conversationId: z.string().uuid().optional(),
   messages: z.array(AgentMessageInput).min(1).max(20),
   currentSearch: z.object({
     product: z.string().trim().max(140).default(""),
@@ -2026,6 +2034,10 @@ function updateResearchSession(response, payload) {
   }
 }
 
+function clientResearchSession(session, conversationId) {
+  return conversationId ? { ...session, conversationId } : session;
+}
+
 async function persistWorkspaceResearch(request, input, productBrief) {
   if (!input.organizationId) return { saved: false, reason: "No organization selected." };
   const user = request.creatorSignalAuth?.user;
@@ -2043,9 +2055,27 @@ async function persistWorkspaceResearch(request, input, productBrief) {
       snapshot,
       productBrief
     });
+    let conversationLinked = true;
+    if (input.conversationId) {
+      try {
+        await linkConversationToResearch({
+          userId: user.id,
+          organizationId: input.organizationId,
+          conversationId: input.conversationId,
+          researchRunId: persisted.researchRunId,
+          product: snapshot.input.product
+        });
+      } catch (error) {
+        conversationLinked = false;
+        console.error("Workspace conversation link failed", error instanceof Error ? error.message : error);
+      }
+    }
     return {
       saved: true,
       researchRunId: persisted.researchRunId,
+      conversationId: input.conversationId || undefined,
+      conversationLinked,
+      reason: conversationLinked ? undefined : "Research was saved, but its agent conversation could not be linked.",
       creatorCount: persisted.creatorRecords.length,
       evidenceCount: persisted.creatorRecords.length + persisted.productEvidenceIds.length
     };
@@ -2230,7 +2260,7 @@ app.post("/api/product-intelligence", async (request, response) => {
       note: agentResult.agentNote
     },
     brief: agentResult.brief,
-    researchSession,
+    researchSession: clientResearchSession(researchSession, input.conversationId),
     workspacePersistence,
     disclaimer:
       "Product research may come from live public web results. Verify creator-specific analytics, rates, and availability before committing budget."
@@ -2337,6 +2367,26 @@ app.post("/api/real-influencers", async (request, response) => {
   });
   if (!researchSession) return;
   const workspacePersistence = await persistWorkspaceResearch(request, { ...input, researchSessionId: researchSession.id });
+  if (workspacePersistence.saved && input.conversationId && request.creatorSignalAuth?.user) {
+    const snapshot = getResearchSessionSnapshot(researchSession.id, requestOwnerKey(request));
+    if (snapshot) {
+      try {
+        const completion = await persistDiscoveryCompletion({
+          userId: request.creatorSignalAuth.user.id,
+          organizationId: input.organizationId,
+          conversationId: input.conversationId,
+          snapshot
+        });
+        Object.assign(workspacePersistence, { conversationCompletionSaved: true, ...completion });
+      } catch (error) {
+        console.error("Discovery completion persistence failed", error instanceof Error ? error.message : error);
+        Object.assign(workspacePersistence, {
+          conversationCompletionSaved: false,
+          reason: "Research was saved, but the completion turn could not be added to its agent conversation."
+        });
+      }
+    }
+  }
   await completeProviderDiagnostic({
     job: providerJob,
     status: discovery.brightDataUsed ? "complete" : "degraded",
@@ -2361,12 +2411,50 @@ app.post("/api/real-influencers", async (request, response) => {
       model: configuredAIModel()
     },
     influencers: discovery.candidates,
-    researchSession,
+    researchSession: clientResearchSession(researchSession, input.conversationId),
     workspacePersistence,
     caveat: discovery.caveat,
     disclaimer:
       "These are real public web results discovered via Bright Data. Metrics are shown only when visible in source text; no private analytics or contact data is inferred."
   });
+});
+
+app.get("/api/agent/conversations/:conversationId", async (request, response) => {
+  const parsed = z.object({
+    conversationId: z.string().uuid(),
+    organizationId: z.string().uuid()
+  }).safeParse({
+    conversationId: request.params.conversationId,
+    organizationId: request.query.organizationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid saved agent conversation." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to resume this agent conversation." });
+    return;
+  }
+  if (!workspaceIntegrationStatus().persistenceConfigured) {
+    response.status(503).json({ error: "Supabase persistence is not connected in this environment." });
+    return;
+  }
+  if (!await userCanAccessOrganization(user.id, parsed.data.organizationId)) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  try {
+    const conversation = await loadConversationFromWorkspace(parsed.data);
+    if (!conversation) {
+      response.status(404).json({ error: "That saved agent conversation was not found." });
+      return;
+    }
+    response.json({ conversation });
+  } catch (error) {
+    console.error("Agent conversation resume failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The saved agent conversation could not be opened right now." });
+  }
 });
 
 app.post("/api/agent/discovery", async (request, response) => {
@@ -2381,7 +2469,8 @@ app.post("/api/agent/discovery", async (request, response) => {
     return;
   }
   if (!await requireWorkspaceProductAccess(request, response, parsed.data.organizationId)) return;
-  if (!agentRequestAllowed(request, `discovery:${user.id}`)) {
+  const conversationId = parsed.data.conversationId || crypto.randomUUID();
+  if (!agentRequestAllowed(request, conversationId)) {
     response.status(429).json({ error: "The discovery agent is receiving too many requests. Try again in a minute." });
     return;
   }
@@ -2394,7 +2483,7 @@ app.post("/api/agent/discovery", async (request, response) => {
       provider: "nvidia",
       operation: "discovery_planning",
       model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
-      metadata: { messageCount: parsed.data.messages.length }
+      metadata: { messageCount: parsed.data.messages.length, conversationId }
     });
     const result = await planCreatorDiscovery({
       messages: parsed.data.messages,
@@ -2418,8 +2507,34 @@ app.post("/api/agent/discovery", async (request, response) => {
         toolsUsed: result.toolsUsed.map((tool) => tool.name)
       }
     });
+    let workspacePersistence = { saved: false, conversationId, reason: "This workspace role cannot save agent memory." };
+    if (workspaceIntegrationStatus().persistenceConfigured && await userCanManageOrganization(user.id, parsed.data.organizationId)) {
+      const userMessage = [...parsed.data.messages].reverse().find((message) => message.role === "user");
+      if (userMessage) {
+        try {
+          const persisted = await persistDiscoveryExchange({
+            userId: user.id,
+            organizationId: parsed.data.organizationId,
+            conversationId,
+            currentSearch: parsed.data.currentSearch,
+            userMessage,
+            agentResult: result
+          });
+          workspacePersistence = { saved: true, ...persisted };
+        } catch (error) {
+          console.error("Discovery conversation persistence failed", error instanceof Error ? error.message : error);
+          workspacePersistence = {
+            saved: false,
+            conversationId,
+            reason: "The agent answered, but this discovery turn could not be saved."
+          };
+        }
+      }
+    }
     response.json({
       ...result,
+      conversationId,
+      workspacePersistence,
       grounded: false,
       grounding: "customer_requirements",
       disclaimer: "Creator identities and recommendations are returned only after the live Bright Data search runs."
@@ -2451,7 +2566,8 @@ app.post("/api/agent/chat", async (request, response) => {
     parsed.data.researchSessionId
   )) return;
 
-  if (!agentRequestAllowed(request, parsed.data.researchSessionId)) {
+  const conversationId = parsed.data.conversationId || parsed.data.researchSessionId;
+  if (!agentRequestAllowed(request, conversationId)) {
     response.status(429).json({ error: "The campaign copilot is receiving too many requests. Try again in a minute." });
     return;
   }
@@ -2520,6 +2636,7 @@ app.post("/api/agent/chat", async (request, response) => {
         const persisted = await persistAgentExchange({
           userId: request.creatorSignalAuth.user.id,
           organizationId: parsed.data.organizationId,
+          conversationId,
           snapshot,
           userMessage,
           agentResult: result
@@ -2543,6 +2660,7 @@ app.post("/api/agent/chat", async (request, response) => {
 
   response.json({
     ...result,
+    session: clientResearchSession(result.session, conversationId),
     workspacePersistence,
     grounded: true,
     disclaimer: "Answers are restricted to the Bright Data public evidence displayed in this research session. Verify rates, availability, audience analytics, rights, and performance directly."
@@ -3646,7 +3764,7 @@ app.get("/api/workspace/research/:researchRunId", async (request, response) => {
       productSources: saved.productSources,
       influencers: saved.influencers,
       messages: saved.messages,
-      researchSession,
+      researchSession: clientResearchSession(researchSession, saved.conversationId),
       resumed: true
     });
   } catch (error) {

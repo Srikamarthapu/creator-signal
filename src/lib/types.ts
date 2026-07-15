@@ -40,6 +40,7 @@ export type IntegrationStatus = {
 
 export type ResearchSessionMeta = {
   id: string;
+  conversationId?: string;
   product: string;
   sourceCount: number;
   creatorCount: number;
@@ -235,6 +236,7 @@ export type CampaignAgentResponse = {
 };
 
 export type DiscoveryAgentResponse = {
+  conversationId: string;
   action: "clarify" | "search";
   answer: string;
   searchPlan: SearchState | null;
@@ -245,12 +247,21 @@ export type DiscoveryAgentResponse = {
   grounded: false;
   grounding: "customer_requirements";
   disclaimer: string;
+  workspacePersistence?: WorkspacePersistence & {
+    conversationId?: string;
+    userMessageId?: string;
+    assistantMessageId?: string;
+    agentRunId?: string;
+  };
 };
 
 export type WorkspacePersistence = {
   saved: boolean;
   reason?: string;
   researchRunId?: string;
+  conversationId?: string;
+  conversationLinked?: boolean;
+  conversationCompletionSaved?: boolean;
   creatorCount?: number;
   evidenceCount?: number;
 };
@@ -264,6 +275,17 @@ export type SavedResearchResponse = {
   messages: CampaignAgentMessage[];
   researchSession: ResearchSessionMeta;
   resumed: true;
+};
+
+export type SavedAgentConversationResponse = {
+  conversation: {
+    id: string;
+    title: string;
+    researchRunId: string | null;
+    messages: CampaignAgentMessage[];
+    createdAt: string;
+    updatedAt: string;
+  };
 };
 
 export type WorkspaceRole = "owner" | "admin" | "marketer" | "approver" | "analyst";

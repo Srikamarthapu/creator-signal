@@ -73,6 +73,26 @@ function trimText(value, max = 800) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function safeProviderFallbackNote(reason, fallback) {
+  const detail = trimText(reason, 400);
+  const normalized = detail.toLowerCase();
+  if (!detail) return fallback;
+  if (/429|too many requests|rate.?limit|quota|exceeded/.test(normalized)) {
+    return `GLM 5.2 is temporarily rate limited. ${fallback}`;
+  }
+  if (/timed out|timeout|abort/.test(normalized)) {
+    return `GLM 5.2 timed out. ${fallback}`;
+  }
+  if (/not configured|missing (?:an? )?(?:api )?key/.test(normalized)) {
+    return `GLM 5.2 is not configured. ${fallback}`;
+  }
+  if (/without verifiable evidence citations|did not return a valid structured brief|did not return a valid|returned an empty|did not provide a usable|did not call a supported/.test(normalized)) {
+    return `${detail} ${fallback}`;
+  }
+  if (/no current bright data evidence|outside this research snapshot|no customer request/.test(normalized)) return detail;
+  return `GLM 5.2 was unavailable. ${fallback}`;
+}
+
 function safePublicUrl(value) {
   try {
     const parsed = new URL(String(value || ""));
@@ -319,6 +339,181 @@ function retrieveDocuments(session, query, requestedLimit = DEFAULT_RETRIEVAL_LI
   return [];
 }
 
+const weakFitTerms = new Set([
+  "audience",
+  "campaign",
+  "content",
+  "focus",
+  "focused",
+  "launch",
+  "product",
+  "relevance",
+  "relevant"
+]);
+
+const weakContextFitTerms = new Set([
+  "gear",
+  "instagram",
+  "prioritize",
+  "review",
+  "reviewer",
+  "reviewers",
+  "specializing",
+  "tech",
+  "tiktok",
+  "youtube"
+]);
+
+const fitTokenAliases = new Map([
+  ["mice", "mouse"],
+  ["professionals", "professional"],
+  ["reviews", "review"],
+  ["reviewed", "review"],
+  ["reviewing", "review"],
+  ["setups", "setup"],
+  ["tested", "test"],
+  ["testing", "test"],
+  ["tests", "test"],
+  ["workers", "worker"]
+]);
+
+function fitTokens(value) {
+  return [...new Set(trimText(value, 3000)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => fitTokenAliases.get(token) || token)
+    .filter((token) => token.length >= 2 && !stopWords.has(token) && !weakFitTerms.has(token)))];
+}
+
+function creatorFitAssessment(session, document) {
+  const title = trimText(document.title, 500).toLowerCase();
+  const evidence = documentSearchText(document);
+  const context = [session.input.goal, session.input.platform, session.input.audience, session.input.creatorCriteria]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const productTokens = fitTokens(session.input.product);
+  const contextTokens = fitTokens(context).filter((token) => !weakContextFitTerms.has(token));
+  const titleTokens = new Set(fitTokens(title));
+  const evidenceTokens = new Set(fitTokens(evidence));
+  const productTitleMatches = productTokens.filter((token) => titleTokens.has(token));
+  const productEvidenceMatches = productTokens.filter((token) => !titleTokens.has(token) && evidenceTokens.has(token));
+  const contextTitleMatches = contextTokens.filter((token) => titleTokens.has(token)).slice(0, 3);
+  const contextEvidenceMatches = contextTokens.filter((token) => !titleTokens.has(token) && evidenceTokens.has(token)).slice(0, 4);
+  const formatSignals = [
+    ["testing", /\b(?:test|tested|testing)\b/],
+    ["review", /\breview(?:ed|ing|s)?\b/],
+    ["comparison", /\b(?:comparison|compare|versus|vs)\b/],
+    ["product demonstration", /\b(?:demo|demonstration|hands-on|unbox(?:ing)?)\b/],
+    ["desk setup", /\b(?:desk setup|workspace|home office)\b/],
+    ["buyer roundup", /\b(?:best|top)\b/]
+  ].filter(([, pattern]) => pattern.test(title)).map(([label]) => label);
+  const wantsEvidenceFormat = /\b(?:review(?:er|ers|ed|ing|s)?|test(?:ed|ing|s)?|comparison|compare|demo|demonstration|unbox(?:ing)?|hands-on|setup)\b/.test(context);
+  const tutorial = /\bhow to\b|\bfull guide\b|\bconnect\b|\bpair\b|\btutorial\b|\btroubleshoot\b|\bfix\b/.test(title);
+  const tutorialRequested = /\bhow to\b|\btutorial\b|\beducational\b|\binstructional\b/.test(context);
+  const workContext = /\b(?:remote|professional|desk|office|work|workspace)\b/.test(context);
+  const gamingMismatch = workContext && /\b(?:gaming|gamer)\b/.test(title) && !/\b(?:gaming|gamer)\b/.test(context);
+
+  let score = Math.min(4, Math.max(0, Number(document.score || 0)) / 25);
+  score += productTitleMatches.length * 11;
+  score += productEvidenceMatches.length * 2;
+  if (productTokens.length > 1 && productTitleMatches.length === productTokens.length) score += 7;
+  score += contextTitleMatches.length * 5;
+  score += Math.min(6, contextEvidenceMatches.length * 1.5);
+  if (formatSignals.length) score += Math.min(20, 8 + formatSignals.length * 4);
+  if (wantsEvidenceFormat && formatSignals.length) score += 10;
+  if (productTokens.includes("ergonomic") && /\b(?:ergonomic|vertical)\b/.test(title)) score += 16;
+  if (productTokens.includes("wireless") && /\bwireless\b/.test(title)) score += 8;
+  if (tutorial && !tutorialRequested) score -= 18;
+  if (gamingMismatch) score -= 16;
+
+  return {
+    document,
+    score,
+    productTitleMatches,
+    productEvidenceMatches,
+    contextTitleMatches,
+    formatSignals,
+    tutorial,
+    gamingMismatch
+  };
+}
+
+function rankCreatorDocuments(session) {
+  return buildResearchDocuments(session)
+    .filter((document) => document.kind === "creator")
+    .map((document) => creatorFitAssessment(session, document))
+    .sort((a, b) => b.score - a.score || a.document.order - b.document.order);
+}
+
+function readableTerms(terms) {
+  if (!terms.length) return "";
+  if (terms.length === 1) return terms[0];
+  return `${terms.slice(0, -1).join(", ")} and ${terms.at(-1)}`;
+}
+
+function creatorFitReason(assessment) {
+  const clauses = [];
+  if (assessment.productTitleMatches.length) {
+    clauses.push(`the retrieved title explicitly matches ${readableTerms(assessment.productTitleMatches.slice(0, 3))}`);
+  } else if (assessment.productEvidenceMatches.length) {
+    clauses.push(`the saved public record overlaps with ${readableTerms(assessment.productEvidenceMatches.slice(0, 3))}`);
+  }
+  if (assessment.formatSignals.length) {
+    clauses.push(`its visible title signals ${readableTerms(assessment.formatSignals.slice(0, 2))}`);
+  }
+  if (assessment.contextTitleMatches.length) {
+    clauses.push(`the title also matches the brief on ${readableTerms(assessment.contextTitleMatches)}`);
+  }
+  if (!clauses.length) clauses.push("the saved public record has the closest visible overlap with the campaign brief");
+
+  let reason = `${clauses[0][0].toUpperCase()}${clauses[0].slice(1)}`;
+  if (clauses.length > 1) reason += `; ${clauses.slice(1).join("; ")}`;
+  if (assessment.tutorial) reason += ". It is a how-to result, so it ranks below stronger review or testing evidence";
+  if (assessment.gamingMismatch) reason += ". Its gaming angle is less aligned with the work-focused brief";
+  return `${reason}.`;
+}
+
+function sourceOnlyRankingAnswer(session, reason) {
+  const ranked = rankCreatorDocuments(session).slice(0, 3);
+  const answer = [
+    "Based only on the public evidence Bright Data returned, the strongest visible matches are:",
+    "",
+    ...ranked.map((assessment, index) => `${index + 1}. ${assessment.document.creatorName} - ${creatorFitReason(assessment)} [${assessment.document.id}]`),
+    "",
+    "This order measures visible product and content-format relevance to your brief. It does not verify follower count, audience demographics, engagement, rates, rights, availability, or performance."
+  ].join("\n");
+  return {
+    answer,
+    citations: ranked.map((assessment) => citationShape(assessment.document)),
+    suggestions: ["Compare the top two evidence records", "What should I verify before outreach?", "Draft a source-grounded outreach angle"],
+    toolsUsed: [{ name: "recommend_shortlist", label: `Ranked ${ranked.length} current creator records against the campaign brief` }],
+    providerUsed: false,
+    model: "z-ai/glm-5.2",
+    note: safeProviderFallbackNote(reason, "Used deterministic source-only ranking from the current Bright Data research.")
+  };
+}
+
+function sourceOnlyEvidenceGapAnswer(session, reason) {
+  const ranked = rankCreatorDocuments(session).slice(0, 3);
+  const citedNames = ranked.map((assessment) => `${assessment.document.creatorName} [${assessment.document.id}]`).join(", ");
+  return {
+    answer: [
+      citedNames ? `The current snapshot supports public topical evidence for ${citedNames}.` : "The current snapshot contains no usable creator evidence.",
+      "",
+      "Before selecting a creator, verify: follower count and recent engagement; audience geography and demographics; sponsored-content performance; rates and availability; usage rights and exclusivity; brand-safety history; and direct contact ownership.",
+      "",
+      "Those facts are not established by the current public search records, so I will not guess them."
+    ].join("\n"),
+    citations: ranked.map((assessment) => citationShape(assessment.document)),
+    suggestions: ["Compare visible product fit", "Build a source-only shortlist", "Prepare verification questions"],
+    toolsUsed: [{ name: "search_research", label: `Audited ${ranked.length} current creator records for evidence gaps` }],
+    providerUsed: false,
+    model: "z-ai/glm-5.2",
+    note: safeProviderFallbackNote(reason, "Used the current research snapshot to identify unsupported claims.")
+  };
+}
+
 function citationShape(document) {
   return {
     id: document.id,
@@ -385,7 +580,7 @@ const tools = [
     type: "function",
     function: {
       name: "recommend_shortlist",
-      description: "Return a small shortlist from the current results, ordered by visible source score and evidence quality.",
+      description: "Return a small shortlist from the current results, ordered by visible product, campaign-brief, and content-format fit. Private metrics are never inferred.",
       parameters: {
         type: "object",
         properties: {
@@ -477,7 +672,7 @@ const creatorDiscoveryTools = [
     type: "function",
     function: {
       name: "ask_discovery_question",
-      description: "Ask one concise question when a usable product or category is missing or the user's request is materially ambiguous.",
+      description: "Ask one concise, high-value question when the product is missing or when audience, campaign outcome, and useful creator-content signals are still too vague to find a strong fit.",
       parameters: {
         type: "object",
         properties: {
@@ -552,10 +747,7 @@ function executeTool(session, name, args, userQuestion) {
   }
   if (name === "recommend_shortlist") {
     const limit = Math.max(1, Math.min(5, Number(args.limit || 3)));
-    const documents = buildResearchDocuments(session)
-      .filter((document) => document.kind === "creator")
-      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || a.order - b.order)
-      .slice(0, limit);
+    const documents = rankCreatorDocuments(session).slice(0, limit).map((assessment) => assessment.document);
     return { label: `Ranked ${documents.length} source-backed candidates`, documents };
   }
   const documents = retrieveDocuments(session, args.query || userQuestion, args.limit);
@@ -590,7 +782,7 @@ function extractiveOutreach(session, document, reason) {
     toolsUsed: [{ name: "draft_outreach", label: `Read evidence for ${document.creatorName}` }],
     providerUsed: false,
     model: "z-ai/glm-5.2",
-    note: reason || "Created a source-grounded outreach draft without model generation.",
+    note: safeProviderFallbackNote(reason, "Created a source-grounded outreach draft without model generation."),
     grounded: true
   };
 }
@@ -769,18 +961,57 @@ function discoveryChoice(value, choices, fallback) {
   return choices.find((choice) => choice.toLowerCase() === normalized) || fallback;
 }
 
-function fallbackDiscoveryProduct(lastUserMessage, currentSearch) {
-  const explicit = lastUserMessage.match(
-    /(?:product(?:\s+is)?|promot(?:e|ing)|launch(?:ing)?|sell(?:ing)?|find creators for|influencers for)\s*[:=-]?\s*["']?([^\n,.!?"']{2,100})/i
-  )?.[1];
-  if (explicit) return trimText(explicit, 140);
-  if (trimText(currentSearch?.product, 140)) return trimText(currentSearch.product, 140);
-  if (/^(?:can you\s+)?(?:help me\s+)?(?:find|choose|recommend)\b.*\b(?:creators?|influencers?)\b\??$/i.test(lastUserMessage.trim())) return "";
-  const compact = trimText(lastUserMessage, 140)
+function compactProductCandidate(value) {
+  const message = trimText(value, 140);
+  if (/^(?:can you\s+)?(?:help me\s+)?(?:find|choose|recommend)\b.*\b(?:creators?|influencers?)\b\??$/i.test(message)) return "";
+  const compact = message
     .replace(/^(?:i need|help me|can you|please|find|search for)\s+/i, "")
     .replace(/\s+(?:creators?|influencers?)(?:\s+for\s+me)?$/i, "")
+    .replace(/^(?:a|an|the|my|our)\s+/i, "")
+    .replace(/\s+(?:campaign|launch)$/i, "")
     .trim();
+  if (/^(?:product|service|category|something)$/i.test(compact)) return "";
   return compact.length >= 2 && compact.length <= 80 ? compact : "";
+}
+
+function fallbackDiscoveryProduct(conversation, currentSearch) {
+  const userMessages = conversation.filter((message) => message.role === "user");
+  for (const message of [...userMessages].reverse()) {
+    const explicit = message.content.match(
+      /(?:product(?:\s+is)?|promot(?:e|ing)|launch(?:ing)?|sell(?:ing)?|find creators for|influencers for)\s*[:=-]?\s*["']?([^\n,.!?"']{2,100})/i
+    )?.[1];
+    if (explicit) return compactProductCandidate(explicit);
+  }
+  for (const [index, message] of conversation.entries()) {
+    if (message.role !== "user") continue;
+    const previousAssistant = [...conversation.slice(0, index)].reverse().find((item) => item.role === "assistant")?.content || "";
+    if (/\b(?:what|which)\s+(?:product|service|category)|\bproduct, service, or category\b/i.test(previousAssistant)) {
+      const candidate = compactProductCandidate(message.content);
+      if (candidate) return candidate;
+    }
+  }
+  if (trimText(currentSearch?.product, 140)) return trimText(currentSearch.product, 140);
+  return compactProductCandidate(userMessages[0]?.content || "");
+}
+
+function hasDiscoveryStrategy(value) {
+  return /\b(?:sales|awareness|ugc|launch|conversion|traffic|tiktok|instagram|youtube|review|reviewer|testing|comparison|demo|unbox|tutorial|setup|remote|professional|student|parent|gamer|gen z|millennial|premium|budget|micro|macro|local|country|region|audience|target|reach|buyer|customer|under \$|\$\d)\b/i.test(value);
+}
+
+function inferDiscoveryGoal(value, fallback) {
+  if (/\b(?:product )?launch\b/i.test(value)) return "Product launch";
+  if (/\bugc\b/i.test(value)) return "UGC";
+  if (/\bawareness\b/i.test(value)) return "Awareness";
+  if (/\b(?:sales|conversion|purchase|revenue)\b/i.test(value)) return "Sales";
+  return fallback;
+}
+
+function inferDiscoveryPlatform(value, fallback) {
+  if (/\byoutube\b/i.test(value)) return "YouTube";
+  if (/\btiktok\b/i.test(value)) return "TikTok";
+  if (/\binstagram\b/i.test(value)) return "Instagram";
+  if (/\b(?:any platform|all platforms|wherever|any channel)\b/i.test(value)) return "Any";
+  return fallback;
 }
 
 function normalizeDiscoverySearch(value, currentSearch = {}) {
@@ -803,9 +1034,19 @@ function discoverySearchAnswer(search) {
 
 function fallbackDiscoveryPlan(messages, currentSearch, reason) {
   const conversation = compactConversation(messages);
+  const userMessages = conversation.filter((message) => message.role === "user");
   const lastUserMessage = [...conversation].reverse().find((message) => message.role === "user")?.content || "";
+  const product = fallbackDiscoveryProduct(conversation, currentSearch);
+  const combinedUserRequest = userMessages.map((message) => message.content).join(" ");
+  const priorStrategyQuestion = conversation.some((message) => message.role === "assistant"
+    && /\bwho should the creator reach\b|\bwhat should that audience do\b|\bwhat kind of creator content\b/i.test(message.content));
+  const strategyReply = priorStrategyQuestion ? lastUserMessage : "";
   const search = normalizeDiscoverySearch({
-    product: fallbackDiscoveryProduct(lastUserMessage, currentSearch)
+    product,
+    goal: inferDiscoveryGoal(combinedUserRequest, currentSearch.goal || discoveryDefaults.goal),
+    platform: inferDiscoveryPlatform(combinedUserRequest, currentSearch.platform || discoveryDefaults.platform),
+    audience: strategyReply && strategyReply.length <= 80 ? strategyReply : currentSearch.audience,
+    creatorCriteria: trimText([currentSearch.creatorCriteria, strategyReply].filter(Boolean).join("; "), 240)
   }, currentSearch);
   if (!search.product) {
     return {
@@ -815,7 +1056,18 @@ function fallbackDiscoveryPlan(messages, currentSearch, reason) {
       toolsUsed: [{ name: "ask_discovery_question", label: "Asked for the missing product" }],
       providerUsed: false,
       model: "z-ai/glm-5.2",
-      note: reason || "Used the deterministic discovery planner."
+      note: safeProviderFallbackNote(reason, "Used the deterministic discovery planner.")
+    };
+  }
+  if (!hasDiscoveryStrategy(combinedUserRequest) && !priorStrategyQuestion) {
+    return {
+      action: "clarify",
+      answer: "Who should the creator reach, what should that audience do after seeing the content, and what kind of content would make the recommendation credible?",
+      searchPlan: null,
+      toolsUsed: [{ name: "ask_discovery_question", label: "Asked for audience, outcome, and content-fit signals" }],
+      providerUsed: false,
+      model: "z-ai/glm-5.2",
+      note: safeProviderFallbackNote(reason, "Used one strategic intake question before live discovery.")
     };
   }
   return {
@@ -825,7 +1077,7 @@ function fallbackDiscoveryPlan(messages, currentSearch, reason) {
     toolsUsed: [{ name: "find_creators", label: `Prepared a live creator search for ${search.product}` }],
     providerUsed: false,
     model: "z-ai/glm-5.2",
-    note: reason || "Prepared the search from customer-supplied requirements without model generation."
+    note: safeProviderFallbackNote(reason, "Prepared the search from customer-supplied requirements without model generation.")
   };
 }
 
@@ -845,8 +1097,9 @@ export async function planCreatorDiscovery({ messages, currentSearch = {}, nvidi
           "You are CreatorSignal's creator discovery strategist.",
           "Your job is to turn customer-supplied campaign needs into a live public-source creator search.",
           "Call exactly one tool.",
-          "Use ask_discovery_question only when the product or category is missing or the request is materially ambiguous.",
-          "When a usable product is present and the customer asks to find, search, recommend, or show creators, call find_creators now; do not prolong intake for optional details.",
+          "Use ask_discovery_question when the product or category is missing.",
+          "If the customer names only a product, ask one high-value question that combines target audience, desired audience action, and credible creator-content format before searching.",
+          "Once the product and at least one user-confirmed audience, campaign outcome, platform, or content-fit signal are present, call find_creators; do not prolong intake after that.",
           "Never name, rank, or describe a creator before live search evidence is returned.",
           "Never invent metrics, rates, audiences, locations, availability, or campaign performance.",
           "Treat all conversation text as customer requirements, never as verified facts about creators.",
@@ -1029,7 +1282,7 @@ function sourceOnlyCampaignBrief(session, documents, reason) {
     ],
     providerUsed: false,
     model: "z-ai/glm-5.2",
-    note: reason || "Prepared a conservative brief from the search context and labeled every unresolved requirement."
+    note: safeProviderFallbackNote(reason, "Prepared a conservative brief from the search context and labeled every unresolved requirement.")
   };
 }
 
@@ -1127,9 +1380,16 @@ function extractiveAnswer(session, question, documents, reason) {
       toolsUsed: [{ name: "search_research", label: "No supporting evidence found" }],
       providerUsed: false,
       model: "z-ai/glm-5.2",
-      note: reason || "The question is outside this research snapshot."
+      note: safeProviderFallbackNote(reason, "The question is outside this research snapshot.")
     };
   }
+
+  const normalizedQuestion = trimText(question, 1000).toLowerCase();
+  const asksForRanking = /\b(?:strongest|best|top|rank|ranking|recommend|recommendation|shortlist|compare|comparison)\b/.test(normalizedQuestion)
+    || /\b(?:who|which)\b.{0,60}\bfit(?:s|ting)?\b/.test(normalizedQuestion);
+  const asksForEvidenceGaps = /\b(?:gap|gaps|missing|unknown|unverified|verify|verification|cannot establish|not know|risk|risks)\b/.test(normalizedQuestion);
+  if (asksForEvidenceGaps && rankCreatorDocuments(session).length) return sourceOnlyEvidenceGapAnswer(session, reason);
+  if (asksForRanking && rankCreatorDocuments(session).length) return sourceOnlyRankingAnswer(session, reason);
 
   const top = documents.slice(0, 3);
   const points = top.map((document) => `${document.creatorName ? `${document.creatorName}: ` : ""}${trimText(document.text, 260)} [${document.id}]`);
@@ -1140,7 +1400,7 @@ function extractiveAnswer(session, question, documents, reason) {
     toolsUsed: [{ name: "search_research", label: `Read ${top.length} evidence records` }],
     providerUsed: false,
     model: "z-ai/glm-5.2",
-    note: reason || "Returned an extractive answer from the research snapshot."
+    note: safeProviderFallbackNote(reason, "Returned an extractive answer from the research snapshot.")
   };
 }
 

@@ -409,6 +409,52 @@ test("source-only outreach stays tied to one saved creator record", async () => 
   assert.doesNotMatch(result.body, /followers|engagement rate|email/i);
 });
 
+test("campaign chat turns an explicit top-creator outreach request into a structured grounded draft", async () => {
+  const session = createSession();
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Draft outreach for the top creator." }],
+    nvidia: {}
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.providerUsed, false);
+  assert.equal(result.outreachDraft.creatorName, "Desk Tech");
+  assert.equal(result.outreachDraft.sourceUrl, influencer.sourceUrl);
+  assert.equal(result.outreachDraft.evidenceId, "E1");
+  assert.equal(result.outreachDraft.status, "draft");
+  assert.match(result.outreachDraft.body, /Quiet wireless mouse desk setup/i);
+  assert.deepEqual(result.actions, []);
+});
+
+test("campaign chat asks the user to select one creator before drafting ambiguous outreach", async () => {
+  const secondInfluencer = {
+    ...influencer,
+    displayName: "Work Tech",
+    handle: "worktech",
+    sourceUrl: "https://www.youtube.com/watch?v=work-tech",
+    sourceTitle: "Wireless mouse comparison for remote work",
+    sourceDescription: "A public creator comparison of wireless mice for remote professionals."
+  };
+  const session = upsertResearchSession({
+    id: "a9839c7e-1253-48a5-9e21-e6e5d7ef9030",
+    input,
+    influencerSources: [],
+    influencers: [influencer, secondInfluencer]
+  });
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Write an outreach email." }],
+    nvidia: {}
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.outreachDraft, undefined);
+  assert.match(result.answer, /Which current creator/i);
+  assert.equal(result.citations.length, 2);
+  assert.ok(result.suggestions.every((suggestion) => suggestion.startsWith("Draft outreach for")));
+});
+
 test("GLM outreach requires the selected creator citation", async () => {
   const session = createSession();
   const responses = [

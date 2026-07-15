@@ -354,6 +354,48 @@ function clientAgentAction(row) {
   };
 }
 
+function persistedMessageArtifacts(agentResult, researchRunId, allowedSourceUrls) {
+  const draft = agentResult?.outreachDraft;
+  if (!draft) return [];
+  const sourceUrl = String(draft.sourceUrl || "").trim();
+  const evidenceId = String(draft.evidenceId || "").trim();
+  const sourceAllowed = researchRunId && new Set(allowedSourceUrls || []).has(sourceUrl);
+  const sourceCited = Array.isArray(agentResult.citations) && agentResult.citations.some((citation) => (
+    citation?.url === sourceUrl && citation?.id === evidenceId
+  ));
+  if (!sourceAllowed || !sourceCited || draft.status !== "draft") {
+    throw new Error("Agent outreach draft was not backed by the active research snapshot.");
+  }
+  const subject = String(draft.subject || "").trim().slice(0, 160);
+  const body = String(draft.body || "").trim().slice(0, 6000);
+  if (!subject || !body) throw new Error("Agent outreach draft was incomplete.");
+  return [{
+    type: "outreach_draft",
+    version: 1,
+    creator_name: String(draft.creatorName || "Creator").trim().slice(0, 160),
+    subject,
+    body,
+    source_url: sourceUrl,
+    evidence_id: evidenceId,
+    status: "draft"
+  }];
+}
+
+function clientOutreachDraft(artifacts) {
+  const artifact = Array.isArray(artifacts)
+    ? artifacts.find((candidate) => candidate?.type === "outreach_draft" && candidate?.status === "draft")
+    : null;
+  if (!artifact) return undefined;
+  return {
+    creatorName: artifact.creator_name || "Creator",
+    subject: artifact.subject || "",
+    body: artifact.body || "",
+    sourceUrl: artifact.source_url || "",
+    evidenceId: artifact.evidence_id || "",
+    status: "draft"
+  };
+}
+
 async function persistAgentActionProposals({
   userId,
   organizationId,
@@ -443,6 +485,7 @@ async function persistConversationExchange({
   const requestMessageId = userMessage.id || crypto.randomUUID();
   const assistantMessageId = deterministicUuid(`${conversationId}:${requestMessageId}:assistant`);
   const exchangeStartedAt = Date.now();
+  const assistantArtifacts = persistedMessageArtifacts(agentResult, researchRunId, allowedSourceUrls);
   await Promise.all([
     assertMessageOwnership({ organizationId, conversationId, messageId: requestMessageId }),
     assertMessageOwnership({ organizationId, conversationId, messageId: assistantMessageId })
@@ -456,6 +499,7 @@ async function persistConversationExchange({
     role: "user",
     content: userMessage.content,
     citations: [],
+    artifacts: [],
     created_at: new Date(exchangeStartedAt).toISOString()
   }, {
     id: assistantMessageId,
@@ -465,6 +509,7 @@ async function persistConversationExchange({
     role: "assistant",
     content: agentResult.answer,
     citations: agentResult.citations || [],
+    artifacts: assistantArtifacts,
     model: agentResult.model,
     created_at: new Date(exchangeStartedAt + 1).toISOString()
   }], { onConflict: "id" }), "Save conversation messages");
@@ -775,7 +820,7 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
   const [messages, agentRuns, agentActions] = await Promise.all([
     workspaceAdmin
       .from("conversation_messages")
-      .select("id, role, content, citations, model, created_at")
+      .select("id, role, content, citations, artifacts, model, created_at")
       .eq("org_id", organizationId)
       .eq("conversation_id", conversationId)
       .in("role", ["user", "assistant"])
@@ -846,6 +891,7 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
       role: message.role,
       content: message.content,
       citations: Array.isArray(message.citations) ? message.citations : [],
+      outreachDraft: clientOutreachDraft(message.artifacts),
       actions: (actionRowsByAssistantMessage.get(message.id) || [])
         .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id))
         .map(clientAgentAction),

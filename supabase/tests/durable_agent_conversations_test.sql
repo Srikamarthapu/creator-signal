@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(14);
+SELECT plan(17);
 
 insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data)
 values
@@ -110,6 +110,19 @@ values
     'Private tenant message.'
   );
 
+update public.conversation_messages
+set artifacts = '[{"type":"outreach_draft","version":1,"creator_name":"Workspace Gear","subject":"Workspace collaboration","body":"A source-backed draft.","source_url":"https://example.test/workspace-gear","evidence_id":"E1","status":"draft"}]'::jsonb
+where id = 'a4000000-0000-4000-8000-000000000002';
+
+select throws_ok(
+  $$update public.conversation_messages
+    set artifacts = '{}'::jsonb
+    where id = 'a4000000-0000-4000-8000-000000000002'$$,
+  '23514',
+  null,
+  'conversation message artifacts must be stored as an array'
+);
+
 insert into public.agent_runs (id, org_id, conversation_id, requested_by, request_message_id, model, provider, status)
 values (
   'a5000000-0000-4000-8000-000000000001',
@@ -143,6 +156,16 @@ select is((select count(*)::integer from public.conversations), 1, 'workspace A 
 select is((select count(*)::integer from public.research_runs), 2, 'workspace A sees only its linked research runs');
 select is((select count(*)::integer from public.conversation_research_runs), 2, 'workspace A sees only its conversation links');
 select is((select count(*)::integer from public.conversation_messages), 2, 'workspace A sees only its conversation messages');
+select is(
+  (select artifacts -> 0 ->> 'type' from public.conversation_messages where id = 'a4000000-0000-4000-8000-000000000002'),
+  'outreach_draft',
+  'workspace members can restore a structured outreach draft from agent memory'
+);
+select is(
+  (select artifacts -> 0 ->> 'source_url' from public.conversation_messages where id = 'a4000000-0000-4000-8000-000000000002'),
+  'https://example.test/workspace-gear',
+  'restored outreach keeps its canonical source URL'
+);
 select is((select count(*)::integer from public.agent_runs), 1, 'workspace A sees only its model runs');
 select is((select count(*)::integer from public.agent_tool_calls), 1, 'workspace A sees only its tool traces');
 select is(

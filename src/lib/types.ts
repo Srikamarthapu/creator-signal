@@ -159,12 +159,22 @@ export type CampaignAgentAction = {
   error?: string;
 };
 
+export type CampaignAgentOutreachDraft = {
+  creatorName: string;
+  subject: string;
+  body: string;
+  sourceUrl: string;
+  evidenceId: string;
+  status: "draft";
+};
+
 export type CampaignAgentMessage = {
   id: string;
   role: CampaignAgentRole;
   content: string;
   citations?: CampaignAgentCitation[];
   actions?: CampaignAgentAction[];
+  outreachDraft?: CampaignAgentOutreachDraft;
   toolsUsed?: CampaignAgentToolTrace[];
   providerUsed?: boolean;
   model?: string;
@@ -239,6 +249,7 @@ export type CampaignAgentResponse = {
   answer: string;
   citations: CampaignAgentCitation[];
   actions: CampaignAgentAction[];
+  outreachDraft?: CampaignAgentOutreachDraft;
   suggestions: string[];
   toolsUsed: CampaignAgentToolTrace[];
   providerUsed: boolean;

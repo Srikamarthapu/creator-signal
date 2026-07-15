@@ -390,8 +390,6 @@ export default function App() {
         writeLocal(agentThreadStorageKey(saved.researchSession.id), saved.messages.slice(-30));
         setRestoredAgentMessages(saved.messages.slice(-30));
         setResearchSession(saved.researchSession);
-        window.history.replaceState({}, "", "/results");
-        setPath("/results");
         window.scrollTo({ top: 0, behavior: "smooth" });
       })
       .catch((error) => {
@@ -613,6 +611,14 @@ export default function App() {
 
   const shortlistDetailId = workspaceResourceId(path, "shortlist");
   const campaignDetailId = workspaceResourceId(path, "campaign");
+  const activeSavedResearchId = savedResearchId(path);
+  const savedResearchReady = Boolean(
+    activeSavedResearchId
+    && researchSession?.id === activeSavedResearchId
+    && !resumeLoading
+    && !resumeError
+  );
+  const resultsVisible = path === "/results" || savedResearchReady;
   const activeInvitationToken = invitationToken(path);
   const localWorkflowPath = path.startsWith("/creator/");
 
@@ -645,7 +651,7 @@ export default function App() {
           />
         ) : null}
 
-        {path === "/results" ? (
+        {resultsVisible ? (
           <ResultsScreen
             searchState={searchState}
             formState={formState}
@@ -731,7 +737,7 @@ export default function App() {
           </Suspense>
         ) : null}
 
-        {savedResearchId(path) ? (
+        {activeSavedResearchId && !savedResearchReady ? (
           !auth.configured || (!auth.loading && !auth.user) ? (
             <AuthScreen navigate={navigate} afterAuthPath={path} />
           ) : resumeError ? (
@@ -760,7 +766,7 @@ export default function App() {
         />
       ) : null}
 
-      {path === "/" || path === "/results" ? (
+      {path === "/" || resultsVisible ? (
         <CampaignCopilot
           session={researchSession}
           initialMessages={restoredAgentMessages}
@@ -789,7 +795,7 @@ function TopNav({
   navigate: (path: string) => void;
 }) {
   const auth = useAuth();
-  const searchActive = path === "/" || path === "/results" || path.startsWith("/creator/");
+  const searchActive = path === "/" || path === "/results" || path.startsWith("/research/") || path.startsWith("/creator/");
   const platformRole = auth.user?.app_metadata?.platform_role;
   const canOpenSupport = platformRole === "operator" || platformRole === "admin";
   return (

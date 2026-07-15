@@ -585,6 +585,72 @@ function completeGroundedAgentTurn(session, userMessage, result) {
   };
 }
 
+function outreachDraftIntent(question) {
+  const normalized = trimText(question, 2400);
+  return /\b(?:draft|write|prepare|create|compose)\b.{0,60}\b(?:outreach|email|message|pitch)\b/i.test(normalized)
+    || /\b(?:outreach|email|message|pitch)\b.{0,60}\b(?:draft|copy|template)\b/i.test(normalized);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveOutreachDocument(session, question) {
+  const normalized = trimText(question, 2400).toLowerCase();
+  const rankedDocuments = rankCreatorDocuments(session).map((assessment) => assessment.document);
+  const creatorDocuments = buildResearchDocuments(session).filter((document) => document.kind === "creator");
+  const namedMatches = creatorDocuments.filter((document) => {
+    const creatorName = trimText(document.creatorName, 140).toLowerCase();
+    const handle = trimText(document.handle, 140).replace(/^@/, "").toLowerCase();
+    return (creatorName.length > 2 && normalized.includes(creatorName))
+      || (handle.length > 2 && new RegExp(`(?:^|[^a-z0-9_])@?${escapeRegExp(handle)}(?:$|[^a-z0-9_])`, "i").test(normalized));
+  });
+  const uniqueNamedMatches = [...new Map(namedMatches.map((document) => [document.id, document])).values()];
+  if (uniqueNamedMatches.length === 1) return { document: uniqueNamedMatches[0], candidates: rankedDocuments };
+  if (uniqueNamedMatches.length > 1) return { document: null, candidates: uniqueNamedMatches };
+  if (/\b(?:top|best|strongest|first|#\s*1|number one)\b/i.test(normalized)) {
+    return { document: rankedDocuments[0] || null, candidates: rankedDocuments };
+  }
+  if (creatorDocuments.length === 1) return { document: creatorDocuments[0], candidates: creatorDocuments };
+  return { document: null, candidates: rankedDocuments };
+}
+
+function outreachClarification(session, candidates) {
+  const documents = candidates.slice(0, 3);
+  const choices = documents.map((document) => `${document.creatorName} [${document.id}]`).join(", ");
+  return {
+    answer: choices
+      ? `Which current creator should I draft outreach for? Choose ${choices}, or ask for the top creator.`
+      : `I cannot draft outreach until this ${session.input.product} research session has a source-backed creator result.`,
+    citations: documents.map(citationShape),
+    suggestions: documents.map((document) => `Draft outreach for ${document.creatorName}`).slice(0, 3),
+    toolsUsed: [{ name: "draft_outreach", label: choices ? "Waiting for one source-backed creator selection" : "No source-backed creator available" }],
+    providerUsed: false,
+    model: "z-ai/glm-5.2",
+    note: "Outreach is prepared for one selected creator at a time and is never sent automatically."
+  };
+}
+
+function campaignAgentOutreachResult(document, draft) {
+  return {
+    answer: `I prepared an editable outreach draft for ${document.creatorName} from the cited public record [${document.id}]. Review the terms and personalization before using it; nothing has been sent.`,
+    citations: draft.citations,
+    suggestions: [`Save ${document.creatorName} to the shortlist`, `What should I verify about ${document.creatorName}?`, "Compare this creator with the next strongest fit"],
+    toolsUsed: draft.toolsUsed,
+    providerUsed: draft.providerUsed,
+    model: draft.model,
+    note: draft.note,
+    outreachDraft: {
+      creatorName: document.creatorName,
+      subject: draft.subject,
+      body: draft.body,
+      sourceUrl: document.url,
+      evidenceId: document.id,
+      status: "draft"
+    }
+  };
+}
+
 const tools = [
   {
     type: "function",
@@ -1473,6 +1539,24 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
   const conversation = compactConversation(messages);
   const userMessage = [...messages].reverse().find((message) => message?.role === "user") || { content: "" };
   const userQuestion = trimText(userMessage.content, 2400);
+  if (outreachDraftIntent(userQuestion)) {
+    const resolution = resolveOutreachDocument(session, userQuestion);
+    if (!resolution.document) {
+      return completeGroundedAgentTurn(session, userMessage, outreachClarification(session, resolution.candidates));
+    }
+    const draft = await draftGroundedOutreach({
+      sessionId,
+      ownerKey,
+      creator: resolution.document.creatorName,
+      campaignName: session.input.product,
+      nvidia,
+      fetchImpl
+    });
+    if (draft.status === "ok") {
+      return completeGroundedAgentTurn(session, userMessage, campaignAgentOutreachResult(resolution.document, draft));
+    }
+    return completeGroundedAgentTurn(session, userMessage, outreachClarification(session, resolution.candidates));
+  }
   const baselineDocuments = retrieveDocuments(session, userQuestion, DEFAULT_RETRIEVAL_LIMIT);
   if (!baselineDocuments.length) {
     return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, [], "No current Bright Data evidence matched the question."));

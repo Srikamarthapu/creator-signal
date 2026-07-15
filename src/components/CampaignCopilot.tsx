@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   CloudOff,
   CloudUpload,
+  Copy,
   Database,
   ExternalLink,
   Loader2,
@@ -88,6 +89,7 @@ export function CampaignCopilot({
   const [suggestions, setSuggestions] = useState(discoveryPrompts);
   const [loading, setLoading] = useState(false);
   const [busyActionId, setBusyActionId] = useState("");
+  const [copiedDraftId, setCopiedDraftId] = useState("");
   const [error, setError] = useState("");
   const [memoryState, setMemoryState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const [resumableResearchRunId, setResumableResearchRunId] = useState("");
@@ -103,6 +105,7 @@ export function CampaignCopilot({
     abortRef.current?.abort();
     setLoading(false);
     setBusyActionId("");
+    setCopiedDraftId("");
     setError("");
     setInput("");
     setView("chat");
@@ -358,6 +361,7 @@ export function CampaignCopilot({
         content: data.answer,
         citations: data.citations,
         actions: data.actions,
+        outreachDraft: data.outreachDraft,
         toolsUsed: data.toolsUsed,
         providerUsed: data.providerUsed,
         model: data.model,
@@ -417,6 +421,17 @@ export function CampaignCopilot({
       setError(actionError instanceof Error ? actionError.message : "The creator could not be saved.");
     } finally {
       setBusyActionId("");
+    }
+  };
+
+  const copyOutreachDraft = async (message: CampaignAgentMessage) => {
+    if (!message.outreachDraft) return;
+    try {
+      await navigator.clipboard.writeText(`Subject: ${message.outreachDraft.subject}\n\n${message.outreachDraft.body}`);
+      setCopiedDraftId(message.id);
+      window.setTimeout(() => setCopiedDraftId((current) => current === message.id ? "" : current), 2400);
+    } catch {
+      setError("The outreach draft could not be copied. Select the text and copy it manually.");
     }
   };
 
@@ -581,6 +596,28 @@ export function CampaignCopilot({
                           </a>
                         ))}
                       </div>
+                    ) : null}
+                    {message.outreachDraft ? (
+                      <section className="copilot-outreach-draft" aria-label={`Outreach draft for ${message.outreachDraft.creatorName}`}>
+                        <div className="copilot-outreach-heading">
+                          <span>
+                            <strong>Draft outreach</strong>
+                            <small>Not sent</small>
+                          </span>
+                          <button type="button" onClick={() => void copyOutreachDraft(message)}>
+                            {copiedDraftId === message.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                            {copiedDraftId === message.id ? "Copied" : "Copy draft"}
+                          </button>
+                        </div>
+                        <div className="copilot-outreach-subject">
+                          <small>Subject</small>
+                          <p>{message.outreachDraft.subject}</p>
+                        </div>
+                        <div className="copilot-outreach-body">
+                          <small>Message</small>
+                          <p>{message.outreachDraft.body}</p>
+                        </div>
+                      </section>
                     ) : null}
                     {message.actions?.length ? (
                       <div className="copilot-actions" aria-label="Shortlist actions">

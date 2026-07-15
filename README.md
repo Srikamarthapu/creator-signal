@@ -1,6 +1,6 @@
 # CreatorSignal
 
-CreatorSignal is an evidence-first creator research and campaign workspace. Bright Data discovers real public creator sources, GLM 5.2 evaluates and discusses only the active research snapshot, and Supabase provides the production identity and persistence foundation.
+CreatorSignal is an evidence-first creator research and campaign workspace. Its GLM 5.2 discovery agent turns a conversation into a bounded live search, Bright Data returns real public creator evidence, and the same agent then evaluates only that active research snapshot. Supabase provides the production identity and persistence foundation.
 
 ## Run Locally
 
@@ -16,7 +16,7 @@ Open `http://127.0.0.1:5173/`.
 Copy `.env.example` to `.env.local` and fill only the integrations you intend to run.
 
 - `BRIGHT_DATA_API_KEY` powers server-side product research and real influencer discovery.
-- `NVIDIA_API_KEY` powers GLM 5.2 evaluation and the grounded campaign copilot.
+- `NVIDIA_API_KEY` powers GLM 5.2 conversational discovery, source-grounded evaluation, and campaign planning.
 - `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` enable browser authentication.
 - `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and the server-only `SUPABASE_SECRET_KEY` enable authenticated persistence.
 - `APP_ORIGIN` sets the trusted base URL used for workspace invitation links.
@@ -28,6 +28,8 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 
 - `/results` contains only real public web results returned through Bright Data discovery.
 - No local or generated creator profiles are used as fallback results.
+- The discovery agent can ask for missing campaign context and launch a real Bright Data search before any results exist.
+- A requested TikTok, Instagram, or YouTube channel is enforced in both the live query and returned creator set.
 - Source match scores are ranking aids, not verified social-platform analytics.
 - The copilot can only retrieve evidence from its server-owned Bright Data research session.
 - Saving a creator requires a signed-in workspace and persists the exact server-side source record.
@@ -50,7 +52,7 @@ supabase db reset
 pnpm test:db
 ```
 
-The database suite currently covers 91 tenant-isolation, role, invitation, account, approval, task, campaign, outreach, entitlement, seat-limit, and provider-diagnostic assertions. Apply the migrations to a cloud project only after choosing the intended Supabase organization and environment.
+The database suite currently covers 120 tenant-isolation, role, invitation, account, campaign-brief, approval, task, campaign, outreach, entitlement, seat-limit, and provider-diagnostic assertions. Apply the migrations to a cloud project only after choosing the intended Supabase organization and environment.
 
 Local team invitations are share links and do not send email. Connect reviewed SMTP or an email provider only when the hosted Supabase environment is configured.
 
@@ -60,12 +62,12 @@ Platform users with `app_metadata.platform_role` set to `operator` or `admin` ca
 
 ## Demo Path
 
-1. Search `ergonomic wireless mouse`.
-2. Review real public creator results.
-3. Open Campaign copilot and ask it to compare the strongest fits.
-4. Inspect the cited source record.
-5. After Supabase is connected, sign in and save the creator to the organization shortlist.
-6. Submit the shortlist for approval, convert it into a campaign, and generate source-grounded outreach.
+1. Choose **Plan with AI agent** and describe the product, audience, goal, platform, budget, and creator preferences.
+2. Let the agent launch its `find_creators` tool and wait for the real Bright Data results.
+3. Ask the same agent to compare the strongest fits and inspect its cited source records.
+4. Open **Brief** to generate, edit, submit, and approve the structured campaign brief.
+5. Save a creator to the organization shortlist and submit it for approval.
+6. Convert the approved shortlist into a campaign and generate source-grounded outreach.
 7. Edit and approve the outreach before copying it for manual use.
 8. Open Settings to invite a teammate, assign roles, and review account data controls.
 9. As a platform operator, open the support console to review provider health and pilot limits.

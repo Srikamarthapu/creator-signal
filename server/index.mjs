@@ -5,8 +5,10 @@ import { Agent, run } from "@openai/agents";
 import { z } from "zod";
 import {
   ResearchSessionConflictError,
+  draftGroundedCampaignBrief,
   draftGroundedOutreach,
   getResearchSessionSnapshot,
+  planCreatorDiscovery,
   runGroundedCampaignAgent,
   upsertResearchSession
 } from "./research-agent.mjs";
@@ -20,6 +22,7 @@ import {
   createWorkspaceInvitation,
   finishProviderJob,
   isPlatformOperator,
+  loadCampaignBrief,
   loadCampaignFromWorkspace,
   loadSupportDashboard,
   loadWorkspaceSettings,
@@ -29,6 +32,7 @@ import {
   previewWorkspaceInvitation,
   removeWorkspaceMember,
   requestOwnerKey,
+  saveCampaignBrief,
   persistAgentExchange,
   persistResearchSnapshot,
   revokeWorkspaceInvitation,
@@ -38,6 +42,7 @@ import {
   setShortlistEntryDecision,
   startProviderJob,
   transitionShortlist,
+  transitionCampaignBrief,
   transitionOutreachDraft,
   updateAccountProfile,
   updateOrganizationEntitlement,
@@ -80,7 +85,8 @@ const ProductIntelligenceRequest = z.object({
   goal: z.string().trim().max(60).optional(),
   platform: z.string().trim().max(40).optional(),
   audience: z.string().trim().max(60).optional(),
-  budget: z.string().trim().max(60).optional()
+  budget: z.string().trim().max(60).optional(),
+  creatorCriteria: z.string().trim().max(240).optional()
 });
 
 const ResearchScopedProductRequest = ProductIntelligenceRequest.extend({
@@ -156,14 +162,36 @@ const RealInfluencerEvaluationRequest = ProductIntelligenceRequest.extend({
   influencers: z.array(RealInfluencerForEvaluation).min(1).max(12)
 });
 
+const AgentMessageInput = z.object({
+  id: z.string().uuid().optional(),
+  role: z.enum(["user", "assistant"]),
+  content: z.string().trim().min(1).max(2400)
+});
+
 const AgentChatRequest = z.object({
   researchSessionId: z.string().uuid(),
   organizationId: z.string().uuid().optional(),
-  messages: z.array(z.object({
-    id: z.string().uuid().optional(),
-    role: z.enum(["user", "assistant"]),
-    content: z.string().trim().min(1).max(2400)
-  })).min(1).max(20)
+  messages: z.array(AgentMessageInput).min(1).max(20)
+});
+
+const AgentDiscoveryRequest = z.object({
+  organizationId: z.string().uuid(),
+  messages: z.array(AgentMessageInput).min(1).max(20),
+  currentSearch: z.object({
+    product: z.string().trim().max(140).default(""),
+    goal: z.string().trim().max(60).default("Sales"),
+    budget: z.string().trim().max(60).default("$1k to $5k"),
+    platform: z.enum(["Any", "TikTok", "Instagram", "YouTube"]).default("Any"),
+    audience: z.string().trim().max(60).default("Audience not yet narrowed"),
+    creatorCriteria: z.string().trim().max(240).default("")
+  }).default({
+    product: "",
+    goal: "Sales",
+    budget: "$1k to $5k",
+    platform: "Any",
+    audience: "Audience not yet narrowed",
+    creatorCriteria: ""
+  })
 });
 
 const SaveCreatorRequest = z.object({
@@ -174,6 +202,39 @@ const SaveCreatorRequest = z.object({
 
 const WorkspaceResourceRequest = z.object({
   organizationId: z.string().uuid()
+});
+
+const CampaignBriefContent = z.object({
+  campaignName: z.string().trim().min(1).max(160),
+  objective: z.string().trim().min(1).max(1000),
+  audience: z.string().trim().min(1).max(500),
+  platforms: z.array(z.string().trim().min(1).max(60)).min(1).max(4),
+  geography: z.string().trim().min(1).max(240),
+  budget: z.object({
+    label: z.string().trim().min(1).max(120),
+    creatorSpend: z.string().trim().min(1).max(240)
+  }),
+  timing: z.object({
+    launchDate: z.string().trim().min(1).max(120),
+    campaignWindow: z.string().trim().min(1).max(240)
+  }),
+  deliverables: z.array(z.string().trim().min(1).max(300)).min(1).max(8),
+  creatorCriteria: z.string().trim().min(1).max(1000),
+  keyMessage: z.string().trim().min(1).max(1000),
+  successMeasures: z.array(z.string().trim().min(1).max(240)).min(1).max(8),
+  assumptions: z.array(z.string().trim().min(1).max(320)).max(10)
+});
+
+const CampaignBriefGenerateRequest = WorkspaceResourceRequest.extend({
+  messages: z.array(AgentMessageInput).max(20).default([])
+});
+
+const CampaignBriefUpdateRequest = WorkspaceResourceRequest.extend({
+  brief: CampaignBriefContent
+});
+
+const CampaignBriefTransitionRequest = WorkspaceResourceRequest.extend({
+  status: z.enum(["draft", "review", "approved", "rejected"])
 });
 
 const ShortlistDecisionRequest = WorkspaceResourceRequest.extend({
@@ -834,9 +895,11 @@ function handleFromSource(source) {
   try {
     const url = new URL(source.link);
     const parts = url.pathname.split("/").filter(Boolean);
-    if (/(instagram|tiktok|youtube)/i.test(url.hostname) && parts[0] && !["p", "reel", "shorts", "watch"].includes(parts[0])) {
+    if (/tiktok/i.test(url.hostname) && parts[0]?.startsWith("@")) {
       return parts[0].replace(/^@/, "");
     }
+    if (/instagram/i.test(url.hostname) && parts[0] && !["p", "reel", "explore"].includes(parts[0])) return parts[0].replace(/^@/, "");
+    if (/youtube/i.test(url.hostname) && parts[0]?.startsWith("@")) return parts[0].replace(/^@/, "");
   } catch {
     // Fall back to parsing the title when the URL is not usable.
   }
@@ -844,7 +907,6 @@ function handleFromSource(source) {
   const patterns = [
     /Instagram\s*[·|-]\s*([a-zA-Z0-9._]+)/i,
     /TikTok\s*[·|-]\s*@?([a-zA-Z0-9._]+)/i,
-    /YouTube\s*[·|-]\s*([a-zA-Z0-9._\s]+)/i,
     /@([a-zA-Z0-9._]{3,})/
   ];
   for (const pattern of patterns) {
@@ -856,6 +918,8 @@ function handleFromSource(source) {
 
 function displayNameFromSource(source, handle) {
   const title = decodeHtml(source.title || "");
+  const youtubePublisher = title.match(/YouTube\s*[·|-]\s*([^·|]+?)(?=\s+\d[\d.,]*[KMB]?\+?\s+(?:views|subscribers)|\s*[·|]|$)/i)?.[1]?.trim();
+  if (youtubePublisher && youtubePublisher.length <= 80) return youtubePublisher;
   const beforePipe = title.split("|")[0]?.trim();
   if (beforePipe && beforePipe.length >= 3 && beforePipe.length <= 40 && !/instagram|tiktok|youtube|things|type|comment/i.test(beforePipe)) {
     return beforePipe;
@@ -915,7 +979,7 @@ function candidateLooksLikeCreator(candidate) {
 function sourceEvidence(source, product) {
   const text = decodeHtml(`${source.title || ""} ${source.description || ""}`);
   const evidence = [];
-  const likes = text.match(/(\d+[kKmM+]*\s*(?:likes|views|subscribers))/i)?.[1];
+  const likes = text.match(/(\d[\d.,]*\s*[kKmMbB]?\+?\s*(?:likes|views|subscribers))/i)?.[1];
   if (likes) evidence.push(`Search result mentions ${likes}.`);
   if (/shop|link|links|ltk|affiliate/i.test(text)) evidence.push("Source text includes shopping/link intent.");
   if (product && text.toLowerCase().includes(product.toLowerCase().split(" ")[0])) evidence.push(`Source text matches "${product}".`);
@@ -1077,34 +1141,43 @@ function sourceBackedResults(product, sources) {
 }
 
 function discoveryQueries(input) {
-  const platform = input.platform && input.platform !== "Any" ? input.platform : "Instagram TikTok YouTube";
+  const platformSites = {
+    TikTok: "site:tiktok.com",
+    Instagram: "site:instagram.com",
+    YouTube: "site:youtube.com"
+  };
+  const platform = input.platform && input.platform !== "Any"
+    ? `${input.platform} ${platformSites[input.platform] || ""}`.trim()
+    : "Instagram TikTok YouTube";
   const productPhrase = productDiscoveryPhrase(input.product);
+  const creatorCriteria = String(input.creatorCriteria || "").replace(/[^\p{L}\p{N}\s'&+-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  const criteria = creatorCriteria ? ` ${creatorCriteria}` : "";
   const category = productSearchCategory(input.product);
   if (category === "phone") {
     return [
-      `${productPhrase} ${platform} smartphone tech creator review`,
-      `${productPhrase} ${platform} phone reviewer influencer hands on`,
-      `${productPhrase} ${platform} iphone android creator camera review`
+      `${productPhrase} ${platform} smartphone tech creator review${criteria}`,
+      `${productPhrase} ${platform} phone reviewer influencer hands on${criteria}`,
+      `${productPhrase} ${platform} iphone android creator camera review${criteria}`
     ];
   }
   if (category === "keyboard" || category === "mouse") {
     return [
-      `${productPhrase} ${platform} desk setup tech creator review`,
-      `${productPhrase} ${platform} gaming setup creator product review`,
-      `${productPhrase} ${platform} influencer hands on review setup`
+      `${productPhrase} ${platform} desk setup tech creator review${criteria}`,
+      `${productPhrase} ${platform} gaming setup creator product review${criteria}`,
+      `${productPhrase} ${platform} influencer hands on review setup${criteria}`
     ];
   }
   if (category === "tech") {
     return [
-      `${productPhrase} ${platform} tech creator review`,
-      `${productPhrase} ${platform} creator setup hands on`,
-      `${productPhrase} ${platform} influencer product review`
+      `${productPhrase} ${platform} tech creator review${criteria}`,
+      `${productPhrase} ${platform} creator setup hands on${criteria}`,
+      `${productPhrase} ${platform} influencer product review${criteria}`
     ];
   }
   return [
-    `${productPhrase} ${platform} creator review shopping links`,
-    `${productPhrase} ${platform} creator product review`,
-    `${productPhrase} ${platform} influencer hands on demo`
+    `${productPhrase} ${platform} creator review shopping links${criteria}`,
+    `${productPhrase} ${platform} creator product review${criteria}`,
+    `${productPhrase} ${platform} influencer hands on demo${criteria}`
   ];
 }
 
@@ -1186,6 +1259,7 @@ async function extractRealInfluencers(input, sources) {
       goal: input.goal,
       platform: input.platform,
       audience: input.audience,
+      creatorCriteria: input.creatorCriteria,
       sourceCandidates: compactCandidatesForAI(fallback),
       sources: compactSourcesForAI(sources),
       guardrail: "Never invent fields that are not visible in the supplied sourceCandidates or sources."
@@ -1364,6 +1438,7 @@ async function runInfluencerEvaluationChunk(input, influencers, provider, batchI
     goal: input.goal,
     platform: input.platform,
     audience: input.audience,
+    creatorCriteria: input.creatorCriteria,
     batch: `${batchIndex + 1} of ${batchCount}`,
     influencers: compactCandidatesForAI(influencers, influencers.length),
     scoringRules: [
@@ -1499,6 +1574,15 @@ async function evaluateRealInfluencers(input) {
   }
 }
 
+function matchesRequestedPlatform({ platform, link, sourceUrl, title, source, description }, requestedPlatform) {
+  if (!requestedPlatform || requestedPlatform === "Any") return true;
+  const requested = requestedPlatform.toLowerCase();
+  const explicit = String(platform || "").toLowerCase();
+  if (explicit && explicit !== "public web") return explicit === requested;
+  const detected = platformFromSource({ link: link || sourceUrl, title, source, description }).toLowerCase();
+  return detected === requested;
+}
+
 async function discoverRealInfluencers(input) {
   const queries = discoveryQueries(input);
   const results = await Promise.all(queries.map((query) => requestBrightDataSerp(query).catch(() => ({ ok: false, sources: [] }))));
@@ -1512,16 +1596,19 @@ async function discoverRealInfluencers(input) {
       sources.push(source);
     }
   }
-  const relevantSources = sourceBackedResults(input.product, sources);
+  const relevantSources = sourceBackedResults(input.product, sources)
+    .filter((source) => matchesRequestedPlatform(source, input.platform));
   const creatorSources = relevantSources.filter(sourceLooksLikeCreatorCandidate).slice(0, 8);
   const extraction = await extractRealInfluencers(input, creatorSources);
+  const candidates = extraction.candidates
+    .filter((candidate) => matchesRequestedPlatform(candidate, input.platform));
   return {
     sources: creatorSources,
-    candidates: extraction.candidates,
+    candidates,
     usedOpenAIAgents: extraction.usedOpenAIAgents,
     caveat: creatorSources.length
-      ? extraction.caveat
-      : `Bright Data returned ${sources.length} public sources, but none showed enough visible creator evidence for "${input.product}". Try a more specific product phrase.`,
+      ? `${extraction.caveat}${input.platform && input.platform !== "Any" ? ` Results are restricted to ${input.platform}.` : ""}`
+      : `Bright Data returned ${sources.length} public sources, but none showed enough visible ${input.platform && input.platform !== "Any" ? `${input.platform} ` : ""}creator evidence for "${input.product}". Try a more specific product phrase or broaden the platform.`,
     brightDataUsed: results.some((result) => result.ok)
   };
 }
@@ -1694,6 +1781,7 @@ async function buildAgentBrief(input, brightDataResult) {
       goal: input.goal,
       platform: input.platform,
       audience: input.audience,
+      creatorCriteria: input.creatorCriteria,
       brightDataSources: compactSourcesForAI(brightDataResult.sources, 5),
       guardrail:
         "Only summarize product demand context. Do not infer real creator analytics or social scraping."
@@ -2002,6 +2090,22 @@ async function requireWorkspaceProductAccess(request, response, organizationId, 
   }
 }
 
+async function ensureWorkspaceResearchSession(request, organizationId, researchRunId) {
+  const ownerKey = requestOwnerKey(request);
+  const existing = getResearchSessionSnapshot(researchRunId, ownerKey);
+  if (existing || !organizationId || !workspaceIntegrationStatus().persistenceConfigured) return existing;
+  const saved = await loadResearchFromWorkspace({ organizationId, researchRunId });
+  if (!saved) return null;
+  upsertResearchSession({
+    id: saved.id,
+    ownerKey,
+    input: saved.input,
+    productSources: saved.productSources,
+    influencers: saved.influencers
+  });
+  return getResearchSessionSnapshot(researchRunId, ownerKey);
+}
+
 async function beginProviderDiagnostic(input) {
   try {
     return await startProviderJob(input);
@@ -2265,6 +2369,74 @@ app.post("/api/real-influencers", async (request, response) => {
   });
 });
 
+app.post("/api/agent/discovery", async (request, response) => {
+  const parsed = AgentDiscoveryRequest.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Tell the discovery agent what you want to promote." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to plan and save creator discovery." });
+    return;
+  }
+  if (!await requireWorkspaceProductAccess(request, response, parsed.data.organizationId)) return;
+  if (!agentRequestAllowed(request, `discovery:${user.id}`)) {
+    response.status(429).json({ error: "The discovery agent is receiving too many requests. Try again in a minute." });
+    return;
+  }
+
+  let providerJob = null;
+  try {
+    providerJob = await beginProviderDiagnostic({
+      organizationId: parsed.data.organizationId,
+      userId: user.id,
+      provider: "nvidia",
+      operation: "discovery_planning",
+      model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+      metadata: { messageCount: parsed.data.messages.length }
+    });
+    const result = await planCreatorDiscovery({
+      messages: parsed.data.messages,
+      currentSearch: parsed.data.currentSearch,
+      nvidia: {
+        apiKey: process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY,
+        baseUrl: process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1",
+        model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+        timeoutMs: Number(process.env.NVIDIA_AGENT_TIMEOUT_MS || 60000),
+        discoveryMaxTokens: Number(process.env.NVIDIA_AGENT_DISCOVERY_MAX_TOKENS || 700)
+      }
+    });
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: result.providerUsed ? "complete" : "degraded",
+      sourceCount: 0,
+      errorCategory: result.providerUsed ? null : "model_fallback",
+      errorSummary: result.providerUsed ? null : result.note,
+      metadata: {
+        action: result.action,
+        toolsUsed: result.toolsUsed.map((tool) => tool.name)
+      }
+    });
+    response.json({
+      ...result,
+      grounded: false,
+      grounding: "customer_requirements",
+      disclaimer: "Creator identities and recommendations are returned only after the live Bright Data search runs."
+    });
+  } catch (error) {
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: "failed",
+      sourceCount: 0,
+      errorCategory: "request_failed",
+      errorSummary: error instanceof Error ? error.message : "Discovery planning failed."
+    });
+    console.error("Discovery agent planning failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The discovery agent could not plan this search right now." });
+  }
+});
+
 app.post("/api/agent/chat", async (request, response) => {
   const parsed = AgentChatRequest.safeParse(request.body);
   if (!parsed.success) {
@@ -2281,6 +2453,22 @@ app.post("/api/agent/chat", async (request, response) => {
 
   if (!agentRequestAllowed(request, parsed.data.researchSessionId)) {
     response.status(429).json({ error: "The campaign copilot is receiving too many requests. Try again in a minute." });
+    return;
+  }
+
+  try {
+    const activeResearch = await ensureWorkspaceResearchSession(
+      request,
+      parsed.data.organizationId,
+      parsed.data.researchSessionId
+    );
+    if (!activeResearch) {
+      response.status(410).json({ error: "This research session expired. Run the creator search again to refresh its evidence." });
+      return;
+    }
+  } catch (error) {
+    console.error("Campaign copilot research resume failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The saved research session could not be opened right now." });
     return;
   }
 
@@ -2361,6 +2549,231 @@ app.post("/api/agent/chat", async (request, response) => {
   });
 });
 
+app.get("/api/workspace/research/:researchRunId/campaign-brief", async (request, response) => {
+  const parsed = z.object({
+    researchRunId: z.string().uuid(),
+    organizationId: z.string().uuid()
+  }).safeParse({
+    researchRunId: request.params.researchRunId,
+    organizationId: request.query.organizationId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid workspace research session." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to open the campaign brief." });
+    return;
+  }
+  const role = await userOrganizationRole(user.id, parsed.data.organizationId);
+  if (!role) {
+    response.status(403).json({ error: "You do not have access to that workspace." });
+    return;
+  }
+  try {
+    const campaignBrief = await loadCampaignBrief(parsed.data);
+    response.json({
+      campaignBrief,
+      permissions: {
+        role,
+        canEdit: ["owner", "admin", "marketer"].includes(role),
+        canApprove: ["owner", "admin", "approver"].includes(role)
+      }
+    });
+  } catch (error) {
+    console.error("Campaign brief load failed", error instanceof Error ? error.message : error);
+    response.status(503).json({ error: "The campaign brief could not be loaded right now." });
+  }
+});
+
+app.post("/api/workspace/research/:researchRunId/campaign-brief/generate", async (request, response) => {
+  const parsed = CampaignBriefGenerateRequest.extend({ researchRunId: z.string().uuid() }).safeParse({
+    ...request.body,
+    researchRunId: request.params.researchRunId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Send valid campaign requirements from an active research session." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to prepare a campaign brief." });
+    return;
+  }
+  if (!await userCanManageOrganization(user.id, parsed.data.organizationId)) {
+    response.status(403).json({ error: "A workspace manager role is required to prepare a campaign brief." });
+    return;
+  }
+  if (!await requireWorkspaceProductAccess(
+    request,
+    response,
+    parsed.data.organizationId,
+    parsed.data.researchRunId
+  )) return;
+  if (!agentRequestAllowed(request, `${parsed.data.researchRunId}:campaign-brief`)) {
+    response.status(429).json({ error: "Campaign brief planning is receiving too many requests. Try again in a minute." });
+    return;
+  }
+
+  let providerJob = null;
+  try {
+    const snapshot = await ensureWorkspaceResearchSession(
+      request,
+      parsed.data.organizationId,
+      parsed.data.researchRunId
+    );
+    if (!snapshot) {
+      response.status(410).json({ error: "This research session expired. Refresh the creator search before preparing a brief." });
+      return;
+    }
+    providerJob = await beginProviderDiagnostic({
+      organizationId: parsed.data.organizationId,
+      userId: user.id,
+      researchRunId: parsed.data.researchRunId,
+      provider: "nvidia",
+      operation: "campaign_brief",
+      model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+      metadata: { messageCount: parsed.data.messages.length }
+    });
+    const result = await draftGroundedCampaignBrief({
+      sessionId: parsed.data.researchRunId,
+      ownerKey: requestOwnerKey(request),
+      messages: parsed.data.messages,
+      nvidia: {
+        apiKey: process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY,
+        baseUrl: process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1",
+        model: process.env.NVIDIA_MODEL || "z-ai/glm-5.2",
+        timeoutMs: Number(process.env.NVIDIA_AGENT_TIMEOUT_MS || 60000),
+        briefMaxTokens: Number(process.env.NVIDIA_AGENT_BRIEF_MAX_TOKENS || 1400)
+      }
+    });
+    if (result.status === "missing") {
+      await completeProviderDiagnostic({
+        job: providerJob,
+        status: "failed",
+        sourceCount: 0,
+        errorCategory: "research_session_missing",
+        errorSummary: "The grounded research session was unavailable."
+      });
+      response.status(410).json({ error: "This research session expired. Refresh the creator search before preparing a brief." });
+      return;
+    }
+    const normalized = CampaignBriefContent.safeParse(result.brief);
+    if (!normalized.success) {
+      await completeProviderDiagnostic({
+        job: providerJob,
+        status: "failed",
+        sourceCount: result.citations?.length || 0,
+        errorCategory: "output_validation",
+        errorSummary: "The campaign brief did not pass structured validation."
+      });
+      response.status(502).json({ error: "The campaign brief could not be validated. Try generating it again." });
+      return;
+    }
+    const campaignBrief = await saveCampaignBrief({
+      organizationId: parsed.data.organizationId,
+      researchRunId: parsed.data.researchRunId,
+      userId: user.id,
+      brief: normalized.data,
+      citations: result.citations,
+      provider: result.providerUsed ? "nvidia" : "source_retrieval",
+      model: result.providerUsed ? result.model : null
+    });
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: result.providerUsed ? "complete" : "degraded",
+      sourceCount: result.citations.length,
+      errorCategory: result.providerUsed ? null : "model_fallback",
+      errorSummary: result.providerUsed ? null : result.note,
+      metadata: {
+        campaignBriefId: campaignBrief.id,
+        version: campaignBrief.version,
+        toolsUsed: result.toolsUsed.map((tool) => tool.name)
+      }
+    });
+    response.status(201).json({
+      campaignBrief,
+      toolsUsed: result.toolsUsed,
+      providerUsed: result.providerUsed,
+      model: result.model,
+      note: result.note,
+      grounded: true
+    });
+  } catch (error) {
+    await completeProviderDiagnostic({
+      job: providerJob,
+      status: "failed",
+      sourceCount: 0,
+      errorCategory: "request_failed",
+      errorSummary: error instanceof Error ? error.message : "Campaign brief generation failed."
+    });
+    sendWorkspaceWorkflowError(response, error, "The campaign brief could not be prepared right now.");
+  }
+});
+
+app.patch("/api/workspace/research/:researchRunId/campaign-brief", async (request, response) => {
+  const parsed = CampaignBriefUpdateRequest.extend({ researchRunId: z.string().uuid() }).safeParse({
+    ...request.body,
+    researchRunId: request.params.researchRunId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: parsed.error.issues[0]?.message || "Complete the structured campaign brief." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to edit the campaign brief." });
+    return;
+  }
+  try {
+    const current = await loadCampaignBrief(parsed.data);
+    if (!current) {
+      response.status(404).json({ error: "Campaign brief not found." });
+      return;
+    }
+    const campaignBrief = await saveCampaignBrief({
+      organizationId: parsed.data.organizationId,
+      researchRunId: parsed.data.researchRunId,
+      userId: user.id,
+      brief: parsed.data.brief,
+      citations: current.citations,
+      provider: "user",
+      model: null
+    });
+    response.json({ saved: true, campaignBrief });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The campaign brief could not be saved.");
+  }
+});
+
+app.post("/api/workspace/research/:researchRunId/campaign-brief/transition", async (request, response) => {
+  const parsed = CampaignBriefTransitionRequest.extend({ researchRunId: z.string().uuid() }).safeParse({
+    ...request.body,
+    researchRunId: request.params.researchRunId
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Choose a valid campaign brief status." });
+    return;
+  }
+  const user = request.creatorSignalAuth?.user;
+  if (!user) {
+    response.status(401).json({ error: "Sign in to review the campaign brief." });
+    return;
+  }
+  try {
+    const campaignBrief = await transitionCampaignBrief({
+      organizationId: parsed.data.organizationId,
+      researchRunId: parsed.data.researchRunId,
+      userId: user.id,
+      status: parsed.data.status
+    });
+    response.json({ saved: true, campaignBrief });
+  } catch (error) {
+    sendWorkspaceWorkflowError(response, error, "The campaign brief status could not be changed.");
+  }
+});
+
 app.post("/api/workspace/shortlist", async (request, response) => {
   const parsed = SaveCreatorRequest.safeParse(request.body);
   if (!parsed.success) {
@@ -2407,7 +2820,7 @@ app.post("/api/workspace/shortlist", async (request, response) => {
 function sendWorkspaceWorkflowError(response, error, fallback) {
   const rawMessage = error instanceof Error ? error.message : "";
   const message = rawMessage.includes(": ") ? rawMessage.slice(rawMessage.indexOf(": ") + 2) : rawMessage;
-  if (/role is required|membership is required|sign in with|verified account|only an owner/i.test(message)) {
+  if (/role is required|membership is required|sign in with|verified account|only an owner|workspace manager (?:role )?is required|an approver (?:must|can)|approver must/i.test(message)) {
     response.status(403).json({ error: message });
     return;
   }

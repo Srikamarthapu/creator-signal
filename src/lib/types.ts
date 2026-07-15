@@ -7,6 +7,7 @@ export type SearchState = {
   budget: string;
   platform: Platform | "Any";
   audience: string;
+  creatorCriteria?: string;
 };
 
 export type IntegrationStatus = {
@@ -166,6 +167,54 @@ export type CampaignAgentToolTrace = {
   label: string;
 };
 
+export type CampaignBriefStatus = "draft" | "review" | "approved" | "rejected";
+
+export type CampaignBriefContent = {
+  campaignName: string;
+  objective: string;
+  audience: string;
+  platforms: string[];
+  geography: string;
+  budget: {
+    label: string;
+    creatorSpend: string;
+  };
+  timing: {
+    launchDate: string;
+    campaignWindow: string;
+  };
+  deliverables: string[];
+  creatorCriteria: string;
+  keyMessage: string;
+  successMeasures: string[];
+  assumptions: string[];
+};
+
+export type CampaignBriefRecord = {
+  id: string;
+  organizationId: string;
+  researchRunId: string;
+  status: CampaignBriefStatus;
+  version: number;
+  brief: CampaignBriefContent;
+  citations: CampaignAgentCitation[];
+  provider: "nvidia" | "source_retrieval" | "user";
+  model: string | null;
+  createdBy: string;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CampaignBriefPermissions = {
+  role: WorkspaceRole;
+  canEdit: boolean;
+  canApprove: boolean;
+};
+
 export type CampaignAgentResponse = {
   status: "ok";
   session: ResearchSessionMeta;
@@ -183,6 +232,19 @@ export type CampaignAgentResponse = {
     userMessageId?: string;
     assistantMessageId?: string;
   };
+};
+
+export type DiscoveryAgentResponse = {
+  action: "clarify" | "search";
+  answer: string;
+  searchPlan: SearchState | null;
+  toolsUsed: CampaignAgentToolTrace[];
+  providerUsed: boolean;
+  model: string;
+  note: string;
+  grounded: false;
+  grounding: "customer_requirements";
+  disclaimer: string;
 };
 
 export type WorkspacePersistence = {

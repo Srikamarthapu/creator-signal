@@ -1118,6 +1118,72 @@ export async function updateAccountProfile({ userId, displayName, accountType })
   };
 }
 
+function normalizeCampaignBriefRecord(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    organizationId: row.org_id,
+    researchRunId: row.research_run_id,
+    status: row.status,
+    version: row.version,
+    brief: row.brief,
+    citations: row.source_references || [],
+    provider: row.provider,
+    model: row.model,
+    createdBy: row.created_by,
+    reviewedBy: row.reviewed_by,
+    reviewedAt: row.reviewed_at,
+    approvedBy: row.approved_by,
+    approvedAt: row.approved_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export async function loadCampaignBrief({ organizationId, researchRunId }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  const row = throwOnError(await workspaceAdmin
+    .from("campaign_briefs")
+    .select("id, org_id, research_run_id, status, version, brief, source_references, provider, model, created_by, reviewed_by, reviewed_at, approved_by, approved_at, created_at, updated_at")
+    .eq("org_id", organizationId)
+    .eq("research_run_id", researchRunId)
+    .maybeSingle(), "Load campaign brief");
+  return normalizeCampaignBriefRecord(row);
+}
+
+export async function saveCampaignBrief({
+  organizationId,
+  researchRunId,
+  userId,
+  brief,
+  citations,
+  provider,
+  model
+}) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  const row = throwOnError(await workspaceAdmin.rpc("workspace_save_campaign_brief", {
+    p_org_id: organizationId,
+    p_research_run_id: researchRunId,
+    p_actor_user_id: userId,
+    p_brief: brief,
+    p_source_references: citations || [],
+    p_provider: provider,
+    p_model: model || null
+  }), "Save campaign brief");
+  return normalizeCampaignBriefRecord(row);
+}
+
+export async function transitionCampaignBrief({ organizationId, researchRunId, userId, status }) {
+  if (!workspaceAdmin) throw new Error("Workspace persistence is not configured.");
+  const row = throwOnError(await workspaceAdmin.rpc("workspace_transition_campaign_brief", {
+    p_org_id: organizationId,
+    p_research_run_id: researchRunId,
+    p_actor_user_id: userId,
+    p_status: status
+  }), "Transition campaign brief");
+  return normalizeCampaignBriefRecord(row);
+}
+
 function normalizeEntitlement(row, usage = 0) {
   if (!row) return null;
   return {

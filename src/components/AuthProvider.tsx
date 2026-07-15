@@ -136,6 +136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const stored = localStorage.getItem(activeOrgStorageKey(user.id)) || "";
       const selected = nextMemberships.find((membership) => membership.orgId === stored) || nextMemberships[0];
       setActiveOrganizationId(selected?.orgId || "");
+      if (!selected) setError("No active workspace is available for this account.");
+    } catch (workspaceError) {
+      setProfile(null);
+      setMemberships([]);
+      setActiveOrganizationId("");
+      throw workspaceError;
     } finally {
       setWorkspaceLoading(false);
     }
@@ -144,12 +150,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!supabase) return;
     let active = true;
-    supabase.auth.getSession().then(({ data, error: sessionError }) => {
+    void (async () => {
+      const { data, error: sessionError } = await supabase.auth.getSession();
+      let verifiedSession = data.session;
+      if (!sessionError && verifiedSession) {
+        const { data: verified, error: verificationError } = await supabase.auth.getUser(verifiedSession.access_token);
+        if (verificationError || !verified.user) {
+          verifiedSession = null;
+          await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+          if (active) setError("Your session expired. Sign in again to continue.");
+        }
+      }
       if (!active) return;
       if (sessionError) setError(sessionError.message);
-      setSession(data.session);
+      setSession(verifiedSession);
       setLoading(false);
-    });
+    })();
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setLoading(false);

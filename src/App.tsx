@@ -17,6 +17,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
 } from "lucide-react";
 import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { AuthScreen } from "./components/AuthScreen";
@@ -70,7 +71,8 @@ const defaultSearch: SearchState = {
   goal: "Sales",
   budget: "$1k to $5k",
   platform: "Instagram",
-  audience: "Millennial"
+  audience: "Millennial",
+  creatorCriteria: ""
 };
 
 function readStoredSearch() {
@@ -125,8 +127,14 @@ function normalizeSavedSearch(search: SavedResearchResponse["search"]): SearchSt
     goal: typeof search.goal === "string" && search.goal.trim() ? search.goal : defaultSearch.goal,
     budget: typeof search.budget === "string" && search.budget.trim() ? search.budget : defaultSearch.budget,
     platform,
-    audience: typeof search.audience === "string" && search.audience.trim() ? search.audience : defaultSearch.audience
+    audience: typeof search.audience === "string" && search.audience.trim() ? search.audience : defaultSearch.audience,
+    creatorCriteria: typeof search.creatorCriteria === "string" ? search.creatorCriteria.trim() : ""
   };
+}
+
+async function responseError(response: Response, fallback: string) {
+  const payload = await response.json().catch(() => null);
+  return new Error(payload?.error || fallback);
 }
 
 function initials(name: string) {
@@ -399,7 +407,15 @@ export default function App() {
   const acceptResearchSession = (nextSession: ResearchSessionMeta) => {
     setResearchSession((current) => {
       if (!current || current.id !== nextSession.id) return nextSession;
-      return nextSession.sourceCount >= current.sourceCount ? nextSession : current;
+      return {
+        ...current,
+        ...nextSession,
+        sourceCount: Math.max(current.sourceCount, nextSession.sourceCount),
+        creatorCount: Math.max(current.creatorCount, nextSession.creatorCount),
+        expiresAt: new Date(current.expiresAt).getTime() > new Date(nextSession.expiresAt).getTime()
+          ? current.expiresAt
+          : nextSession.expiresAt
+      };
     });
   };
 
@@ -417,11 +433,12 @@ export default function App() {
           platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
           audience: nextSearch.audience,
           budget: nextSearch.budget,
+          creatorCriteria: nextSearch.creatorCriteria,
           researchSessionId,
           organizationId: auth.activeOrganization?.id
         })
       });
-      if (!response.ok) throw new Error("Product intelligence request failed.");
+      if (!response.ok) throw await responseError(response, "Product intelligence request failed.");
       const data = (await response.json()) as ProductIntelligence;
       setIntelligence(data);
       acceptResearchSession(data.researchSession);
@@ -446,12 +463,13 @@ export default function App() {
           platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
           audience: nextSearch.audience,
           budget: nextSearch.budget,
+          creatorCriteria: nextSearch.creatorCriteria,
           researchSessionId,
           organizationId: auth.activeOrganization?.id,
           influencers
         })
       });
-      if (!response.ok) throw new Error("AI influencer evaluation request failed.");
+      if (!response.ok) throw await responseError(response, "AI influencer evaluation request failed.");
       const data = (await response.json()) as InfluencerEvaluationResponse;
       const nextEvaluations: Record<string, InfluencerEvaluation> = {};
       for (const evaluation of data.evaluations) {
@@ -483,11 +501,12 @@ export default function App() {
           platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
           audience: nextSearch.audience,
           budget: nextSearch.budget,
+          creatorCriteria: nextSearch.creatorCriteria,
           researchSessionId,
           organizationId: auth.activeOrganization?.id
         })
       });
-      if (!response.ok) throw new Error("Real influencer discovery request failed.");
+      if (!response.ok) throw await responseError(response, "Real influencer discovery request failed.");
       const data = (await response.json()) as RealInfluencerResponse;
       setRealInfluencers(data.influencers);
       setRealInfluencerMeta(data);
@@ -500,12 +519,28 @@ export default function App() {
     }
   };
 
-  const startResearch = (nextSearch: SearchState) => {
-    const researchSessionId = newResearchSessionId();
+  const startResearch = (nextSearch: SearchState, researchSessionId = newResearchSessionId()) => {
     setResearchSession(null);
     setShortlistedUrls(new Set());
     void requestRealInfluencers(nextSearch, researchSessionId);
     void requestIntelligence(nextSearch, researchSessionId);
+    return researchSessionId;
+  };
+
+  const startAgentResearch = (nextSearch: SearchState, researchSessionId: string) => {
+    const normalizedSearch = { ...nextSearch, product: nextSearch.product.trim() };
+    setValidationError("");
+    setSortMode("match");
+    setRiskFilter("Any");
+    setPlatformFilter("Any");
+    setIntentFilter("Any");
+    setQualityFilter("Any");
+    setCostFilter("Any");
+    setFormState(normalizedSearch);
+    setSearchState(normalizedSearch);
+    persist(storageKeys.lastSearch, normalizedSearch);
+    if (path !== "/results") navigate("/results");
+    startResearch(normalizedSearch, researchSessionId);
   };
 
   const saveRealInfluencer = async (influencer: RealInfluencer) => {
@@ -539,6 +574,19 @@ export default function App() {
 
   const submitSearch = (event: FormEvent) => {
     event.preventDefault();
+    if (auth.loading || auth.workspaceLoading) {
+      setValidationError("Your workspace is still opening. Try again in a moment.");
+      return;
+    }
+    if (auth.configured && !auth.user) {
+      navigate("/auth");
+      return;
+    }
+    if (auth.configured && !auth.activeOrganization) {
+      setValidationError(auth.error || "Choose an active workspace before starting creator discovery.");
+      void auth.refreshWorkspace();
+      return;
+    }
     if (!formState.product.trim()) {
       setValidationError("Enter a product or category to start.");
       return;
@@ -564,10 +612,11 @@ export default function App() {
 
   useEffect(() => {
     if (path !== "/results" || !searchState.product.trim()) return;
-    if (realInfluencers.length || realInfluencersLoading || realInfluencerMeta || realInfluencersError) return;
+    if (auth.loading || auth.workspaceLoading || !auth.user || !auth.activeOrganization) return;
+    if (realInfluencers.length || realInfluencersLoading || realInfluencerMeta) return;
     startResearch(searchState);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, searchState.product, searchState.goal, searchState.platform, searchState.audience]);
+  }, [auth.activeOrganization?.id, auth.loading, auth.user?.id, auth.workspaceLoading, path, searchState.product, searchState.goal, searchState.platform, searchState.audience, searchState.creatorCriteria]);
 
   return (
     <div className="min-h-dvh bg-mist text-ink">
@@ -705,11 +754,16 @@ export default function App() {
         />
       ) : null}
 
-      {path === "/results" ? (
+      {path === "/" || path === "/results" ? (
         <CampaignCopilot
           session={researchSession}
           product={searchState.product || formState.product || "this product"}
           configured={Boolean(integrationStatus?.campaignAgent?.configured)}
+          navigate={navigate}
+          currentSearch={formState}
+          onStartSearch={startAgentResearch}
+          researchLoading={realInfluencersLoading || intelligenceLoading}
+          researchError={realInfluencersError || intelligenceError}
         />
       ) : null}
     </div>
@@ -811,6 +865,14 @@ function SearchScreen({
           <p>
             Rank creator fit, source public evidence, build a shortlist, and move into outreach from one calm workspace.
           </p>
+          <button
+            className="agent-primary-launch"
+            type="button"
+            onClick={() => window.dispatchEvent(new Event("creatorsignal:open-agent"))}
+          >
+            <Sparkles className="h-4 w-4" />
+            Plan with AI agent
+          </button>
         </div>
 
         <form className="creator-command" onSubmit={submitSearch}>

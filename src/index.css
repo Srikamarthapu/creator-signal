@@ -491,6 +491,10 @@
     animation: drawer-in 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
 
+  .copilot-panel-brief {
+    @apply w-[min(680px,calc(100vw-1.5rem))];
+  }
+
   .copilot-header {
     @apply flex min-h-20 shrink-0 items-center justify-between gap-3 border-b border-line bg-white px-4 py-3;
   }
@@ -519,6 +523,18 @@
     color: #0f766e;
   }
 
+  .copilot-view-tabs {
+    @apply grid shrink-0 grid-cols-2 border-b border-line bg-white px-3 pt-2;
+  }
+
+  .copilot-view-tabs button {
+    @apply flex min-h-10 items-center justify-center gap-2 border-b-2 border-transparent px-3 text-xs font-semibold text-muted transition-colors hover:text-ink;
+  }
+
+  .copilot-view-tabs button[aria-selected="true"] {
+    @apply border-signal-900 text-signal-900;
+  }
+
   .copilot-scroll {
     @apply min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5;
     scroll-behavior: smooth;
@@ -538,6 +554,26 @@
 
   .copilot-welcome p {
     @apply mt-2 text-sm leading-6 text-muted;
+  }
+
+  .copilot-auth-gate {
+    @apply mt-4 grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 rounded-lg border border-line bg-mist p-4 text-muted;
+  }
+
+  .copilot-auth-gate > svg {
+    @apply mt-0.5 text-signal-900;
+  }
+
+  .copilot-auth-gate strong {
+    @apply block text-sm font-semibold text-ink;
+  }
+
+  .copilot-auth-gate p {
+    @apply mt-1 text-xs leading-5;
+  }
+
+  .copilot-auth-gate .primary-button {
+    @apply col-span-2 w-full;
   }
 
   .copilot-messages {
@@ -662,6 +698,217 @@
     @apply mt-2 px-1 text-[10px] leading-4 text-muted;
   }
 
+  .campaign-brief-loading {
+    @apply flex min-h-40 items-center justify-center gap-2 text-sm font-medium text-muted;
+  }
+
+  .campaign-brief-empty {
+    @apply mx-auto flex min-h-[24rem] max-w-md flex-col items-center justify-center px-5 text-center;
+  }
+
+  .campaign-brief-empty > span:first-child {
+    @apply grid h-11 w-11 place-items-center rounded-full bg-signal-50 text-signal-900;
+  }
+
+  .campaign-brief-empty h3 {
+    @apply mt-4 text-lg font-semibold text-ink;
+  }
+
+  .campaign-brief-empty > p {
+    @apply mt-2 text-sm leading-6 text-muted;
+  }
+
+  .campaign-brief-empty > .primary-button {
+    @apply mt-5;
+  }
+
+  .campaign-brief-role-note {
+    @apply mt-5 border-t border-line pt-4 text-xs font-medium text-muted;
+  }
+
+  .campaign-brief-workspace {
+    @apply min-w-0 pb-4;
+  }
+
+  .campaign-brief-heading {
+    @apply flex min-w-0 items-start justify-between gap-3 border-b border-line pb-4;
+  }
+
+  .campaign-brief-heading > div {
+    @apply min-w-0;
+  }
+
+  .campaign-brief-title-line {
+    @apply flex min-w-0 flex-wrap items-center gap-2;
+  }
+
+  .campaign-brief-title-line h3 {
+    @apply min-w-0 text-xl font-semibold leading-7 text-ink;
+  }
+
+  .campaign-brief-heading > div > p {
+    @apply mt-1 text-xs leading-5 text-muted;
+  }
+
+  .campaign-brief-status {
+    @apply inline-flex min-h-7 items-center rounded-full border px-2.5 text-[10px] font-semibold;
+  }
+
+  .campaign-brief-status-draft {
+    @apply border-line bg-mist text-muted;
+  }
+
+  .campaign-brief-status-review {
+    @apply border-amber-200 bg-amber-50 text-amber-800;
+  }
+
+  .campaign-brief-status-approved {
+    @apply border-emerald-200 bg-emerald-50 text-emerald-800;
+  }
+
+  .campaign-brief-status-rejected {
+    @apply border-red-200 bg-red-50 text-danger;
+  }
+
+  .campaign-brief-success {
+    @apply mt-3 flex min-h-11 items-center gap-2 border-y border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800;
+  }
+
+  .campaign-brief-readout {
+    @apply min-w-0;
+  }
+
+  .campaign-brief-readout > section {
+    @apply grid gap-5 border-b border-line py-5 last:border-b-0;
+  }
+
+  .campaign-brief-grid {
+    @apply sm:grid-cols-2;
+  }
+
+  .campaign-brief-field {
+    @apply min-w-0;
+  }
+
+  .campaign-brief-field > small {
+    @apply block text-[10px] font-semibold uppercase text-muted;
+  }
+
+  .campaign-brief-field > p,
+  .campaign-brief-field li {
+    @apply mt-1 text-sm leading-6 text-ink;
+    overflow-wrap: anywhere;
+  }
+
+  .campaign-brief-field ul,
+  .campaign-brief-assumptions ul {
+    @apply list-disc pl-5;
+  }
+
+  .campaign-brief-assumptions {
+    @apply bg-amber-50/60 px-3;
+  }
+
+  .campaign-brief-assumptions > div {
+    @apply flex items-center gap-2 text-xs text-amber-900;
+  }
+
+  .campaign-brief-assumptions li {
+    @apply mt-1 text-xs leading-5 text-amber-900;
+  }
+
+  .campaign-brief-sources {
+    @apply gap-2;
+  }
+
+  .campaign-brief-sources > strong {
+    @apply text-xs font-semibold text-ink;
+  }
+
+  .campaign-brief-sources a {
+    @apply grid min-h-12 grid-cols-[1.75rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-line py-2 text-ink last:border-b-0;
+  }
+
+  .campaign-brief-sources a > span:first-child {
+    @apply grid h-7 w-7 place-items-center rounded-full bg-mist text-[10px] font-semibold text-signal-900;
+  }
+
+  .campaign-brief-sources b,
+  .campaign-brief-sources small {
+    @apply block truncate;
+  }
+
+  .campaign-brief-sources b {
+    @apply text-xs font-semibold;
+  }
+
+  .campaign-brief-sources small {
+    @apply mt-0.5 text-[10px] text-muted;
+  }
+
+  .campaign-brief-approved {
+    @apply flex min-h-14 flex-row items-center gap-3 bg-emerald-50/70 px-3 text-emerald-800;
+  }
+
+  .campaign-brief-approved strong,
+  .campaign-brief-approved small {
+    @apply block;
+  }
+
+  .campaign-brief-approved strong {
+    @apply text-xs font-semibold;
+  }
+
+  .campaign-brief-approved small {
+    @apply mt-0.5 text-[10px];
+  }
+
+  .campaign-brief-actions {
+    @apply flex flex-col justify-between gap-2 border-t border-line pt-4 sm:flex-row sm:items-center;
+  }
+
+  .campaign-brief-actions > div {
+    @apply flex flex-wrap gap-2;
+  }
+
+  .campaign-brief-actions .primary-button,
+  .campaign-brief-actions .secondary-button {
+    @apply min-h-9 px-3 text-xs;
+  }
+
+  .campaign-brief-reject {
+    @apply border-red-200 text-danger hover:bg-red-50;
+  }
+
+  .campaign-brief-form {
+    @apply grid gap-4 py-4;
+  }
+
+  .campaign-brief-form label {
+    @apply grid min-w-0 gap-1.5;
+  }
+
+  .campaign-brief-form label > span {
+    @apply text-xs font-semibold text-ink;
+  }
+
+  .campaign-brief-form input,
+  .campaign-brief-form textarea {
+    @apply min-h-10 w-full min-w-0 rounded-lg border border-line bg-mist px-3 py-2 text-sm leading-6 text-ink outline-none transition-colors focus:border-signal-700 focus:bg-white focus:ring-2 focus:ring-signal-100;
+  }
+
+  .campaign-brief-form textarea {
+    @apply resize-y;
+  }
+
+  .campaign-brief-form-grid {
+    @apply grid gap-3 sm:grid-cols-2;
+  }
+
+  .campaign-brief-form-actions {
+    @apply flex flex-col gap-2 border-t border-line pt-4 sm:flex-row;
+  }
+
   .message-box {
     @apply min-h-72 w-full resize-y rounded-lg border border-line bg-mist p-4 text-sm leading-6 outline-none transition-all duration-300 focus:border-signal-900 focus:bg-white focus:shadow-panel;
   }
@@ -736,6 +983,10 @@
 
   .hero-copy p:not(.eyebrow) {
     @apply mt-4 max-w-2xl text-base leading-7 text-muted sm:text-lg;
+  }
+
+  .agent-primary-launch {
+    @apply mt-6 inline-flex min-h-11 items-center gap-2 rounded-lg border border-signal-900 bg-signal-900 px-4 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-500 focus-visible:ring-offset-2;
   }
 
   .creator-command {

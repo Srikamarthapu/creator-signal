@@ -1,5 +1,6 @@
 import {
   Bot,
+  ClipboardCheck,
   Database,
   ExternalLink,
   Loader2,
@@ -10,22 +11,32 @@ import {
   Sparkles,
   X
 } from "lucide-react";
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, lazy, Suspense, useEffect, useRef, useState } from "react";
 import { agentThreadStorageKey, readLocal, writeLocal } from "../lib/storage";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "./AuthProvider";
 import type {
   CampaignAgentMessage,
   CampaignAgentResponse,
-  ResearchSessionMeta
+  DiscoveryAgentResponse,
+  ResearchSessionMeta,
+  SearchState
 } from "../lib/types";
 
-const starterPrompts = [
+const groundedPrompts = [
   "Who are the strongest fits and why?",
   "Compare the top three creator results.",
   "What evidence gaps should I verify?",
   "Build a three-creator shortlist for outreach."
 ];
+
+const discoveryPrompts = [
+  "Find creators for a product launch.",
+  "Help me define the right creator profile.",
+  "I need creators who can drive sales."
+];
+
+const CampaignBriefWorkspace = lazy(() => import("./CampaignBriefWorkspace").then((module) => ({ default: module.CampaignBriefWorkspace })));
 
 function messageId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -42,30 +53,48 @@ function storedMessages(sessionId: string) {
 export function CampaignCopilot({
   session,
   product,
-  configured
+  configured,
+  navigate,
+  currentSearch,
+  onStartSearch,
+  researchLoading,
+  researchError
 }: {
   session: ResearchSessionMeta | null;
   product: string;
   configured: boolean;
+  navigate: (path: string) => void;
+  currentSearch: SearchState;
+  onStartSearch: (search: SearchState, researchSessionId: string) => void;
+  researchLoading: boolean;
+  researchError: string;
 }) {
   const auth = useAuth();
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState<"chat" | "brief">("chat");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<CampaignAgentMessage[]>([]);
-  const [suggestions, setSuggestions] = useState(starterPrompts);
+  const [suggestions, setSuggestions] = useState(discoveryPrompts);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const pendingSearchIdRef = useRef("");
+  const previousResearchLoadingRef = useRef(false);
 
   useEffect(() => {
     abortRef.current?.abort();
     setLoading(false);
     setError("");
     setInput("");
-    setSuggestions(starterPrompts);
+    setView("chat");
+    if (pendingSearchIdRef.current && (!session || session.id === pendingSearchIdRef.current)) {
+      if (session) setSuggestions(groundedPrompts);
+      return;
+    }
+    setSuggestions(session?.sourceCount && session.creatorCount ? groundedPrompts : discoveryPrompts);
     setMessages(session ? storedMessages(session.id) : []);
   }, [session?.id]);
 
@@ -73,6 +102,57 @@ export function CampaignCopilot({
     if (!session) return;
     writeLocal(agentThreadStorageKey(session.id), messages.slice(-30));
   }, [messages, session]);
+
+  useEffect(() => {
+    const openAgent = () => setOpen(true);
+    window.addEventListener("creatorsignal:open-agent", openAgent);
+    return () => window.removeEventListener("creatorsignal:open-agent", openAgent);
+  }, []);
+
+  useEffect(() => {
+    const pendingSearchId = pendingSearchIdRef.current;
+    const finished = previousResearchLoadingRef.current && !researchLoading;
+    previousResearchLoadingRef.current = researchLoading;
+    if (!pendingSearchId || !finished) return;
+
+    if (session?.id === pendingSearchId && session.creatorCount > 0) {
+      const completionId = `discovery-complete-${pendingSearchId}`;
+      setMessages((current) => current.some((message) => message.id === completionId) ? current : [...current, {
+        id: completionId,
+        role: "assistant",
+        content: `I found ${session.creatorCount} source-backed creator candidate${session.creatorCount === 1 ? "" : "s"}. I can now compare their evidence, surface risks, and help you choose the strongest fit.`,
+        toolsUsed: [{ name: "search_research", label: `Loaded ${session.sourceCount} Bright Data evidence records` }],
+        providerUsed: false,
+        model: "z-ai/glm-5.2",
+        note: "Creator recommendations are now restricted to this live research session.",
+        createdAt: new Date().toISOString()
+      }]);
+      setSuggestions(groundedPrompts);
+      pendingSearchIdRef.current = "";
+      return;
+    }
+
+    if (researchError) {
+      setError(researchError);
+      setSuggestions(["Retry this creator search", ...discoveryPrompts.slice(1)]);
+      pendingSearchIdRef.current = "";
+      return;
+    }
+
+    const completionId = `discovery-empty-${pendingSearchId}`;
+    setMessages((current) => current.some((message) => message.id === completionId) ? current : [...current, {
+      id: completionId,
+      role: "assistant",
+      content: "The live search finished without enough usable public creator evidence. Tell me a preferred platform, niche, geography, or content format and I’ll reshape the search.",
+      toolsUsed: [{ name: "find_creators", label: "No source-backed creator candidates returned" }],
+      providerUsed: false,
+      model: "z-ai/glm-5.2",
+      note: "No local or invented creator profiles were substituted.",
+      createdAt: new Date().toISOString()
+    }]);
+    setSuggestions(["Retry with YouTube reviewers", "Narrow the creator niche", "Search across every platform"]);
+    pendingSearchIdRef.current = "";
+  }, [researchError, researchLoading, session]);
 
   useEffect(() => {
     if (!open) return;
@@ -93,7 +173,7 @@ export function CampaignCopilot({
   useEffect(() => {
     if (!open) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, loading, open]);
+  }, [messages, loading, open, researchLoading]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -105,7 +185,7 @@ export function CampaignCopilot({
   const clearThread = () => {
     abortRef.current?.abort();
     setMessages([]);
-    setSuggestions(starterPrompts);
+    setSuggestions(session?.sourceCount && session.creatorCount ? groundedPrompts : discoveryPrompts);
     setLoading(false);
     setError("");
     inputRef.current?.focus();
@@ -113,7 +193,11 @@ export function CampaignCopilot({
 
   const sendMessage = async (content: string) => {
     const question = content.trim();
-    if (!question || !session || loading) return;
+    if (!question || loading || researchLoading) return;
+    if (!auth.user || !auth.activeOrganization) {
+      setError("Sign in to use the creator discovery agent and save its research.");
+      return;
+    }
 
     const userMessage: CampaignAgentMessage = {
       id: messageId(),
@@ -131,13 +215,56 @@ export function CampaignCopilot({
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      const groundedReady = Boolean(session?.sourceCount && session.creatorCount);
+      const requestsNewSearch = /\b(?:new|another|different|more|redo|retry)\b.{0,40}\b(?:search|creators?|influencers?)\b|\b(?:search|find|discover)\b.{0,50}\b(?:creators?|influencers?)\b.{0,30}\b(?:for|about|instead)\b/i.test(question);
+      if (!groundedReady || requestsNewSearch) {
+        const response = await apiFetch("/api/agent/discovery", {
+          method: "POST",
+          signal: controller.signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            organizationId: auth.activeOrganization.id,
+            currentSearch,
+            messages: nextMessages.slice(-16).map((message) => ({
+              id: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(message.id) ? message.id : undefined,
+              role: message.role,
+              content: message.content
+            }))
+          })
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(payload?.error || "The discovery agent could not plan this search.");
+        const data = payload as DiscoveryAgentResponse;
+        const assistantMessage: CampaignAgentMessage = {
+          id: messageId(),
+          role: "assistant",
+          content: data.answer,
+          toolsUsed: data.toolsUsed,
+          providerUsed: data.providerUsed,
+          model: data.model,
+          note: data.note,
+          createdAt: new Date().toISOString()
+        };
+        setMessages((current) => [...current, assistantMessage]);
+        if (data.action === "search" && data.searchPlan) {
+          const researchSessionId = messageId();
+          pendingSearchIdRef.current = researchSessionId;
+          previousResearchLoadingRef.current = false;
+          setSuggestions([]);
+          onStartSearch(data.searchPlan, researchSessionId);
+        } else {
+          setSuggestions(discoveryPrompts.slice(1));
+        }
+        return;
+      }
+
       const response = await apiFetch("/api/agent/chat", {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          researchSessionId: session.id,
-          organizationId: auth.activeOrganization?.id,
+          researchSessionId: session!.id,
+          organizationId: auth.activeOrganization.id,
           messages: nextMessages.slice(-16).map((message) => ({
             id: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(message.id) ? message.id : undefined,
             role: message.role,
@@ -160,7 +287,7 @@ export function CampaignCopilot({
         createdAt: new Date().toISOString()
       };
       setMessages((current) => [...current, assistantMessage]);
-      setSuggestions(data.suggestions.length ? data.suggestions : starterPrompts.slice(0, 3));
+      setSuggestions(data.suggestions.length ? data.suggestions : groundedPrompts.slice(0, 3));
     } catch (requestError) {
       if (requestError instanceof Error && requestError.name === "AbortError") return;
       setError(requestError instanceof Error ? requestError.message : "The campaign copilot could not answer this question.");
@@ -182,8 +309,8 @@ export function CampaignCopilot({
     }
   };
 
-  const ready = Boolean(session?.sourceCount);
-  const buttonLabel = ready ? "Ask campaign copilot" : "Preparing research";
+  const ready = Boolean(session?.sourceCount && session.creatorCount);
+  const buttonLabel = researchLoading ? "Searching live sources" : ready ? "Ask discovery agent" : "Plan with AI agent";
 
   return (
     <>
@@ -192,21 +319,20 @@ export function CampaignCopilot({
         className="copilot-trigger"
         type="button"
         onClick={() => setOpen(true)}
-        disabled={!ready}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls="campaign-copilot"
       >
-        {ready ? <MessageSquareText className="h-5 w-5" /> : <Loader2 className="h-5 w-5 animate-spin" />}
+        {researchLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : ready ? <MessageSquareText className="h-5 w-5" /> : <Sparkles className="h-5 w-5" />}
         <span>{buttonLabel}</span>
-        {ready ? <small>{session?.sourceCount} sources</small> : null}
+        <small>{ready ? `${session?.sourceCount} sources` : researchLoading ? "Bright Data" : "Start here"}</small>
       </button>
 
       {open ? (
         <div className="copilot-layer" onMouseDown={(event) => event.target === event.currentTarget && close()}>
           <aside
             id="campaign-copilot"
-            className="copilot-panel"
+            className={`copilot-panel ${view === "brief" ? "copilot-panel-brief" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="campaign-copilot-title"
@@ -217,8 +343,8 @@ export function CampaignCopilot({
                   <Bot className="h-5 w-5" />
                 </span>
                 <div className="min-w-0">
-                  <p className="eyebrow">Research agent</p>
-                  <h2 id="campaign-copilot-title">Campaign copilot</h2>
+                  <p className="eyebrow">AI creator strategist</p>
+                  <h2 id="campaign-copilot-title">Creator discovery agent</h2>
                 </div>
               </div>
               <div className="flex items-center gap-1">
@@ -232,21 +358,57 @@ export function CampaignCopilot({
             </header>
 
             <div className="copilot-grounding-bar">
-              <span><Database className="h-3.5 w-3.5" /> {session?.sourceCount || 0} current sources</span>
-              <span><ShieldCheck className="h-3.5 w-3.5" /> Bright Data only</span>
+              <span><Database className="h-3.5 w-3.5" /> {ready ? `${session?.sourceCount || 0} current sources` : "Campaign intake"}</span>
+              <span><ShieldCheck className="h-3.5 w-3.5" /> {ready ? "Evidence grounded" : "Live search tool"}</span>
               <span className={configured ? "copilot-provider-on" : ""}>
-                <Sparkles className="h-3.5 w-3.5" /> {configured ? "GLM 5.2 ready" : "Source-only mode"}
+                <Sparkles className="h-3.5 w-3.5" /> {configured ? "GLM 5.2 ready" : "Structured fallback"}
               </span>
             </div>
 
+            {ready ? <div className="copilot-view-tabs" role="tablist" aria-label="Creator discovery workspace">
+              <button type="button" role="tab" aria-selected={view === "chat"} onClick={() => setView("chat")}>
+                <MessageSquareText className="h-4 w-4" /> Chat
+              </button>
+              <button type="button" role="tab" aria-selected={view === "brief"} onClick={() => setView("brief")}>
+                <ClipboardCheck className="h-4 w-4" /> Brief
+              </button>
+            </div> : null}
+
             <div className="copilot-scroll" ref={scrollRef} aria-live="polite">
+              {view === "brief" ? (
+                session ? (
+                  <Suspense fallback={<div className="campaign-brief-loading"><Loader2 className="h-5 w-5 animate-spin" /> Opening campaign brief...</div>}>
+                    <CampaignBriefWorkspace session={session} messages={messages} navigate={navigate} />
+                  </Suspense>
+                ) : null
+              ) : (<>
               {!messages.length ? (
                 <div className="copilot-welcome">
                   <div className="copilot-welcome-icon"><MessageSquareText className="h-6 w-6" /></div>
-                  <h3>Plan from the research you can see.</h3>
+                  <h3>{ready ? "Choose from evidence, not guesswork." : "Tell me who you need to reach."}</h3>
                   <p>
-                    Ask about {product || "this search"}. I can compare current creators, inspect evidence, identify gaps, and build a shortlist. I will not answer from outside this research session.
+                    {ready
+                      ? `I can compare the current ${product || "creator"} results, inspect evidence, surface risks, and help build a shortlist without stepping outside this research session.`
+                      : "Describe the product, audience, campaign goal, budget, and any creator preferences. I’ll shape the search, launch Bright Data, and then help you compare only the creators it actually returns."}
                   </p>
+                </div>
+              ) : null}
+
+              {!auth.user || !auth.activeOrganization ? (
+                <div className="copilot-auth-gate">
+                  <ShieldCheck className="h-5 w-5" />
+                  <div>
+                    <strong>{auth.user ? "Opening your workspace" : "Sign in to start discovery"}</strong>
+                    <p>{auth.user ? auth.error || "Creator searches need an active workspace." : "Your searches and agent decisions are saved to a private workspace."}</p>
+                  </div>
+                  <button
+                    className="primary-button"
+                    type="button"
+                    disabled={auth.workspaceLoading}
+                    onClick={() => auth.user ? void auth.refreshWorkspace() : navigate("/auth")}
+                  >
+                    {auth.user ? auth.workspaceLoading ? "Opening..." : "Reload workspace" : "Sign in"}
+                  </button>
                 </div>
               ) : null}
 
@@ -256,7 +418,7 @@ export function CampaignCopilot({
                     <div className="copilot-message-label">
                       <span>{message.role === "user" ? "You" : "Copilot"}</span>
                       {message.role === "assistant" ? (
-                        <small>{message.providerUsed ? "GLM 5.2" : "Source-only"}</small>
+                        <small>{message.providerUsed ? "GLM 5.2" : message.citations?.length ? "Source-only" : "Structured"}</small>
                       ) : null}
                     </div>
                     <p>{message.content}</p>
@@ -286,10 +448,10 @@ export function CampaignCopilot({
                   </article>
                 ))}
 
-                {loading ? (
+                {loading || researchLoading ? (
                   <div className="copilot-thinking" role="status">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Searching this research and asking GLM 5.2...</span>
+                    <span>{researchLoading ? "Bright Data is finding real public creator evidence..." : ready ? "Searching this research and asking GLM 5.2..." : "Turning your requirements into a creator search..."}</span>
                   </div>
                 ) : null}
               </div>
@@ -301,7 +463,7 @@ export function CampaignCopilot({
                 </div>
               ) : null}
 
-              {suggestions.length && !loading ? (
+              {suggestions.length && !loading && !researchLoading && auth.user ? (
                 <div className="copilot-prompts" aria-label="Suggested questions">
                   {suggestions.map((suggestion) => (
                     <button type="button" key={suggestion} onClick={() => void sendMessage(suggestion)}>
@@ -310,10 +472,11 @@ export function CampaignCopilot({
                   ))}
                 </div>
               ) : null}
+              </>)}
             </div>
 
-            <form className="copilot-composer" onSubmit={submit}>
-              <label htmlFor="campaign-copilot-input">Ask about this research</label>
+            {view === "chat" && auth.user && auth.activeOrganization ? <form className="copilot-composer" onSubmit={submit}>
+              <label htmlFor="campaign-copilot-input">{ready ? "Ask about these creators" : "Describe the creators you need"}</label>
               <div>
                 <textarea
                   ref={inputRef}
@@ -321,16 +484,16 @@ export function CampaignCopilot({
                   value={input}
                   onChange={(event) => setInput(event.target.value.slice(0, 2400))}
                   onKeyDown={handleInputKeyDown}
-                  placeholder="Compare creators or plan an outreach angle..."
+                  placeholder={ready ? "Compare creators or refine the search..." : "We are launching a desk lamp for remote workers..."}
                   rows={2}
-                  disabled={loading || !ready}
+                  disabled={loading || researchLoading}
                 />
-                <button type="submit" disabled={!input.trim() || loading || !ready} aria-label="Send message">
+                <button type="submit" disabled={!input.trim() || loading || researchLoading} aria-label="Send message">
                   {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                 </button>
               </div>
-              <p>Enter to send. Shift+Enter for a new line. Verify campaign facts at the linked source.</p>
-            </form>
+              <p>{ready ? "Recommendations stay tied to linked public evidence." : "The agent will ask only for details that improve discovery."}</p>
+            </form> : null}
           </aside>
         </div>
       ) : null}

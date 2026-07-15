@@ -4,6 +4,7 @@ import {
   __resetResearchSessionsForTests,
   draftGroundedCampaignBrief,
   draftGroundedOutreach,
+  getResearchSessionSnapshot,
   planCreatorDiscovery,
   runGroundedCampaignAgent,
   upsertResearchSession
@@ -128,10 +129,14 @@ test("GLM discovery uses the bounded find tool and returns only a search plan", 
                 name: "find_creators",
                 arguments: JSON.stringify({
                   product: "ergonomic mouse",
+                  productUrl: "https://example.test/products/ergonomic-mouse",
                   goal: "Product launch",
                   budget: "$5k to $20k",
                   platform: "YouTube",
                   audience: "Remote professionals",
+                  geography: "United States",
+                  deliverable: "Product review",
+                  timing: "September launch",
                   creatorCriteria: "Review-led content and desk setup relevance"
                 })
               }
@@ -148,6 +153,10 @@ test("GLM discovery uses the bounded find tool and returns only a search plan", 
   assert.equal(result.action, "search");
   assert.equal(result.searchPlan.product, "ergonomic mouse");
   assert.equal(result.searchPlan.platform, "YouTube");
+  assert.equal(result.searchPlan.productUrl, "https://example.test/products/ergonomic-mouse");
+  assert.equal(result.searchPlan.geography, "United States");
+  assert.equal(result.searchPlan.deliverable, "Product review");
+  assert.equal(result.searchPlan.timing, "September launch");
   assert.match(result.searchPlan.creatorCriteria, /desk setup/i);
   assert.equal(result.toolsUsed[0].name, "find_creators");
   assert.doesNotMatch(result.answer, /@|followers|engagement/i);
@@ -165,6 +174,9 @@ test("source-only fallback cites only records in the research session", async ()
   assert.equal(result.providerUsed, false);
   assert.equal(result.citations.length, 1);
   assert.equal(result.citations[0].url, influencer.sourceUrl);
+  assert.match(result.citations[0].observedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(result.citations[0].expiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(result.citations[0].verificationClass, "public_evidence");
   assert.match(result.answer, /\[E1\]/);
   assert.deepEqual(result.actions, []);
 });
@@ -373,6 +385,38 @@ test("out-of-scope questions are refused without calling the model", async () =>
   assert.equal(result.providerUsed, false);
   assert.equal(result.citations.length, 0);
   assert.match(result.answer, /only answer from the Bright Data evidence/i);
+});
+
+test("concurrent research updates merge product and creator evidence into one session", () => {
+  const id = "ed4e774f-140f-44a5-b43d-b820d72b5c44";
+  upsertResearchSession({
+    id,
+    input,
+    productSources: [{
+      title: "Wireless mouse product page",
+      source: "brand.example.com",
+      description: "Brand-supplied public product details.",
+      link: "https://brand.example.com/mouse",
+      rank: 1
+    }]
+  });
+  upsertResearchSession({
+    id,
+    input,
+    influencerSources: [{
+      title: influencer.sourceTitle,
+      source: "tiktok.com",
+      description: influencer.sourceDescription,
+      link: influencer.sourceUrl,
+      rank: 1
+    }],
+    influencers: [influencer]
+  });
+
+  const snapshot = getResearchSessionSnapshot(id);
+  assert.equal(snapshot.productSources.length, 1);
+  assert.equal(snapshot.influencerSources.length, 1);
+  assert.equal(snapshot.influencers.length, 1);
 });
 
 test("research sessions cannot be read by a different owner", async () => {
@@ -718,6 +762,37 @@ test("source-only campaign brief labels unresolved requirements and stays tied t
   assert.ok(result.brief.assumptions.some((assumption) => /timing/i.test(assumption)));
   assert.ok(result.brief.assumptions.some((assumption) => /usage rights/i.test(assumption)));
   assert.equal(result.toolsUsed[0].name, "prepare_campaign_brief");
+});
+
+test("source-only campaign brief preserves marketer-supplied market, format, and timing", async () => {
+  const session = upsertResearchSession({
+    id: "ff98c043-2d02-4dda-a902-27d3e46ce422",
+    input: {
+      ...input,
+      geography: "United States",
+      deliverable: "One YouTube product review",
+      timing: "September launch, four-week window",
+      creatorCriteria: "Remote-work specialists"
+    },
+    influencerSources: [{
+      title: influencer.sourceTitle,
+      source: "tiktok.com",
+      description: influencer.sourceDescription,
+      link: influencer.sourceUrl,
+      rank: 1
+    }],
+    influencers: [influencer]
+  });
+  const result = await draftGroundedCampaignBrief({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Prepare the campaign brief from my search details." }],
+    nvidia: {}
+  });
+
+  assert.equal(result.brief.geography, "United States");
+  assert.deepEqual(result.brief.deliverables, ["One YouTube product review"]);
+  assert.equal(result.brief.timing.campaignWindow, "September launch, four-week window");
+  assert.match(result.brief.creatorCriteria, /Remote-work specialists/);
 });
 
 test("GLM campaign brief uses a bounded tool and filters unsupported citations and assistant claims", async () => {

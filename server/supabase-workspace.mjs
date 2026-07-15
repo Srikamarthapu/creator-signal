@@ -79,6 +79,11 @@ function sourceType(value) {
   return ["profile", "post", "article"].includes(value) ? value : "search_result";
 }
 
+function timestampOr(value, fallback) {
+  const date = new Date(String(value || ""));
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
+}
+
 async function assertResearchOwnership(organizationId, researchId) {
   const existingRun = throwOnError(await workspaceAdmin
     .from("research_runs")
@@ -120,6 +125,9 @@ function creatorIdentityKey(influencer) {
 
 async function upsertInfluencerEvidence({ organizationId, snapshot, influencer }) {
   const now = new Date();
+  const observedAt = timestampOr(influencer.observedAt, now.toISOString());
+  const expiresAt = timestampOr(influencer.expiresAt, new Date(new Date(observedAt).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString());
+  const verificationClass = influencer.verificationClass === "public_evidence" ? influencer.verificationClass : "public_evidence";
 
   const creatorData = throwOnError(await workspaceAdmin.from("creator_records").upsert({
     org_id: organizationId,
@@ -129,8 +137,8 @@ async function upsertInfluencerEvidence({ organizationId, snapshot, influencer }
     profile_url: influencer.profileUrl || null,
     niche: influencer.niche,
     identity_key: creatorIdentityKey(influencer),
-    verification_class: "public_evidence",
-    last_observed_at: now.toISOString()
+    verification_class: verificationClass,
+    last_observed_at: observedAt
   }, { onConflict: "org_id,identity_key" }).select("id").single(), "Save creator");
 
   const creatorId = creatorData.id;
@@ -143,10 +151,10 @@ async function upsertInfluencerEvidence({ organizationId, snapshot, influencer }
     source_type: sourceType(influencer.sourceType),
     title: influencer.sourceTitle,
     excerpt: influencer.sourceDescription,
-    verification_class: "public_evidence",
+    verification_class: verificationClass,
     confidence: influencer.confidence.toLowerCase(),
-    observed_at: now.toISOString(),
-    expires_at: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    observed_at: observedAt,
+    expires_at: expiresAt,
     content_hash: crypto.createHash("sha256").update(`${influencer.sourceTitle}:${influencer.sourceDescription}`).digest("hex")
   }, { onConflict: "research_run_id,source_url" }).select("id").single(), "Save evidence");
 
@@ -175,6 +183,8 @@ async function upsertInfluencerEvidence({ organizationId, snapshot, influencer }
 async function upsertProductEvidence({ organizationId, snapshot, source }) {
   if (!source.link) return null;
   const now = new Date();
+  const observedAt = timestampOr(source.observedAt, now.toISOString());
+  const expiresAt = timestampOr(source.expiresAt, new Date(new Date(observedAt).getTime() + 14 * 24 * 60 * 60 * 1000).toISOString());
   const evidenceData = throwOnError(await workspaceAdmin.from("evidence_sources").upsert({
     org_id: organizationId,
     research_run_id: snapshot.id,
@@ -186,8 +196,8 @@ async function upsertProductEvidence({ organizationId, snapshot, source }) {
     excerpt: source.description,
     verification_class: "public_evidence",
     confidence: source.description ? "medium" : "low",
-    observed_at: now.toISOString(),
-    expires_at: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    observed_at: observedAt,
+    expires_at: expiresAt,
     content_hash: crypto.createHash("sha256").update(`${source.title}:${source.description}`).digest("hex")
   }, { onConflict: "research_run_id,source_url" }).select("id").single(), "Save product evidence");
   return evidenceData.id;
@@ -1149,7 +1159,7 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
       .order("rank", { ascending: true, nullsFirst: false }),
     workspaceAdmin
       .from("evidence_sources")
-      .select("id, creator_id, provider, source_url, source_type, title, excerpt, confidence, observed_at, expires_at")
+      .select("id, creator_id, provider, source_url, source_type, title, excerpt, verification_class, confidence, observed_at, expires_at")
       .eq("org_id", organizationId)
       .eq("research_run_id", researchRunId),
     workspaceAdmin
@@ -1198,7 +1208,8 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
         sourceType: toClientSourceType(source.source_type),
         matchScore: Number(recommendation.ai_score ?? recommendation.source_score ?? 0),
         observedAt: source.observed_at,
-        expiresAt: source.expires_at || undefined
+        expiresAt: source.expires_at || undefined,
+        verificationClass: source.verification_class || "public_evidence"
       }
     };
   }).filter(Boolean);
@@ -1218,7 +1229,10 @@ export async function loadResearchFromWorkspace({ organizationId, researchRunId 
       source: source.provider,
       description: source.excerpt || "",
       link: source.source_url,
-      rank: index + 1
+      rank: index + 1,
+      observedAt: source.observed_at,
+      expiresAt: source.expires_at || undefined,
+      verificationClass: source.verification_class || "public_evidence"
     }));
 
   const shortlistEntryRows = activeShortlist ? throwOnError(await workspaceAdmin

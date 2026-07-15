@@ -3,10 +3,14 @@ export type CampaignRisk = "Low" | "Medium" | "High";
 
 export type SearchState = {
   product: string;
+  productUrl?: string;
   goal: string;
   budget: string;
   platform: Platform | "Any";
   audience: string;
+  geography?: string;
+  deliverable?: string;
+  timing?: string;
   creatorCriteria?: string;
 };
 
@@ -15,6 +19,8 @@ export type IntegrationStatus = {
     configured: boolean;
     searchUrlConfigured: boolean;
     serpZoneConfigured: boolean;
+    fetchUrlConfigured: boolean;
+    unlockerZoneConfigured: boolean;
     country: string;
   };
   openaiAgents: {
@@ -59,6 +65,9 @@ export type ProductIntelligence = {
       description: string;
       link?: string;
       rank: number;
+      observedAt?: string;
+      expiresAt?: string;
+      verificationClass?: "public_evidence";
     }>;
     meta?: {
       query?: string;
@@ -97,6 +106,9 @@ export type RealInfluencer = {
   confidence: "Low" | "Medium" | "High";
   sourceType: "profile" | "post" | "article" | "searchResult";
   matchScore: number;
+  observedAt?: string;
+  expiresAt?: string;
+  verificationClass?: "public_evidence";
 };
 
 export type InfluencerEvaluation = {
@@ -242,6 +254,9 @@ export type CampaignAgentCitation = {
   url: string;
   excerpt: string;
   creatorName?: string;
+  observedAt?: string;
+  expiresAt?: string;
+  verificationClass?: "public_evidence";
 };
 
 export type CampaignAgentToolTrace = {

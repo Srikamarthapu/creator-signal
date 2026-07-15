@@ -55,6 +55,19 @@ function messageId() {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function citationFreshness(observedAt?: string, expiresAt?: string) {
+  const format = (value?: string) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(date);
+  };
+  const observed = format(observedAt);
+  const expired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
+  if (expired) return observed ? `Observed ${observed}; refresh due` : "Refresh due";
+  return observed ? `Observed ${observed}` : "Freshness not recorded";
+}
+
 function storedMessages(sessionId: string) {
   return readLocal<CampaignAgentMessage[]>(agentThreadStorageKey(sessionId), []).filter(
     (message) => message?.role === "user" || message?.role === "assistant"
@@ -601,6 +614,7 @@ export function CampaignCopilot({
                             <span className="min-w-0">
                               <b>{citation.creatorName || citation.title}</b>
                               <small>{citation.title}</small>
+                              <small>{citationFreshness(citation.observedAt, citation.expiresAt)}</small>
                             </span>
                             <ExternalLink className="h-3.5 w-3.5 shrink-0" />
                           </a>

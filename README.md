@@ -15,7 +15,7 @@ Open `http://127.0.0.1:5173/`.
 
 Copy `.env.example` to `.env.local` and fill only the integrations you intend to run.
 
-- `BRIGHT_DATA_API_KEY` powers server-side product research and real influencer discovery.
+- `BRIGHT_DATA_API_KEY` powers server-side product research and real influencer discovery; optional product-page URLs are read through the configured Web Unlocker zone.
 - `NVIDIA_API_KEY` powers GLM 5.2 conversational discovery, source-grounded evaluation, and campaign planning.
 - `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` enable browser authentication.
 - `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and the server-only `SUPABASE_SECRET_KEY` enable authenticated persistence.
@@ -30,6 +30,8 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 - No local or generated creator profiles are used as fallback results.
 - The discovery agent can ask for missing campaign context and launch a real Bright Data search before any results exist.
 - Structured search is the primary discovery surface; the conversational research agent remains available in a side drawer before and after results load.
+- Optional campaign details carry the product page, target market, content format, timing, and creator requirements through live search, saved research, and agent planning.
+- Every public evidence record carries an observed time and refresh deadline in creator cards and agent citations.
 - Product-only requests receive one strategic intake question about audience, desired action, and credible creator-content format before discovery.
 - A requested TikTok, Instagram, or YouTube channel is enforced in both the live query and returned creator set.
 - Source match scores are ranking aids, not verified social-platform analytics.

@@ -359,6 +359,14 @@
     @apply bg-white;
   }
 
+  .evidence-freshness {
+    @apply mt-3 flex items-center gap-1.5 text-xs font-medium text-signal-700;
+  }
+
+  .evidence-freshness-due {
+    @apply text-caution;
+  }
+
   .ai-evaluation {
     @apply mt-5 rounded-lg border border-line bg-white p-4;
   }
@@ -459,6 +467,19 @@
 
   .source-link {
     @apply flex items-center justify-between gap-3 rounded-lg border border-line bg-mist px-3 py-2 text-sm font-medium text-ink transition-all duration-300 hover:-translate-y-0.5 hover:border-signal-900 hover:bg-white;
+  }
+
+  .source-link strong,
+  .source-link small {
+    @apply block overflow-hidden text-ellipsis;
+  }
+
+  .source-link strong {
+    @apply line-clamp-2 text-sm font-semibold leading-5;
+  }
+
+  .source-link small {
+    @apply mt-1 text-[10px] font-medium text-muted;
   }
 
   .drawer-backdrop {
@@ -1341,6 +1362,54 @@
 
   .control-grid {
     @apply grid gap-5 lg:grid-cols-2;
+  }
+
+  .campaign-details-disclosure {
+    @apply border-t border-line pt-4;
+  }
+
+  .campaign-details-toggle {
+    @apply flex min-h-11 w-full items-center justify-between gap-4 rounded-lg px-3 text-left text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mist focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-500 focus-visible:ring-offset-2;
+  }
+
+  .campaign-details-toggle > span,
+  .campaign-details-toggle-state {
+    @apply flex items-center gap-2;
+  }
+
+  .campaign-details-toggle-state {
+    @apply shrink-0 text-xs font-medium text-muted;
+  }
+
+  .campaign-details-fields {
+    @apply mt-4 grid gap-4 border-t border-line pt-5 sm:grid-cols-2;
+    animation: content-enter 220ms ease-out both;
+  }
+
+  .campaign-detail-field {
+    @apply grid min-w-0 gap-2;
+  }
+
+  .campaign-detail-field-wide {
+    @apply sm:col-span-2;
+  }
+
+  .campaign-detail-field > span {
+    @apply text-sm font-semibold text-ink;
+  }
+
+  .campaign-detail-field input,
+  .campaign-detail-field select {
+    @apply min-h-11 w-full rounded-lg border border-line bg-white px-3 text-base text-ink outline-none transition-colors duration-200 placeholder:text-muted focus:border-signal-900 focus:ring-2 focus:ring-signal-100;
+  }
+
+  .search-context-row {
+    @apply mt-4 flex flex-wrap gap-2 border-t border-line pt-4;
+  }
+
+  .search-context-row span {
+    @apply max-w-full rounded-full bg-mist px-3 py-1.5 text-xs font-medium text-muted;
+    overflow-wrap: anywhere;
   }
 
   .source-promise-grid {

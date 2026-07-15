@@ -125,14 +125,29 @@ function safePublicUrl(value) {
   }
 }
 
-function normalizeSource(source, index = 0) {
+function evidenceTimestamp(value, fallback) {
+  const parsed = new Date(String(value || ""));
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString();
+}
+
+function evidenceWindow(value, ttlDays) {
+  const observedAt = evidenceTimestamp(value?.observedAt, new Date().toISOString());
+  return {
+    observedAt,
+    expiresAt: evidenceTimestamp(value?.expiresAt, new Date(new Date(observedAt).getTime() + ttlDays * 24 * 60 * 60 * 1000).toISOString()),
+    verificationClass: "public_evidence"
+  };
+}
+
+function normalizeSource(source, index = 0, ttlDays = 14) {
   const link = safePublicUrl(source?.link || source?.url);
   return {
     title: sanitizeSourceText(source?.title || source?.source, 200) || `Public result ${index + 1}`,
     source: trimText(source?.source || "Public web result", 120),
     description: sanitizeSourceText(source?.description || source?.snippet || source?.text, 700),
     link,
-    rank: Number.isFinite(Number(source?.rank)) ? Number(source.rank) : index + 1
+    rank: Number.isFinite(Number(source?.rank)) ? Number(source.rank) : index + 1,
+    ...evidenceWindow(source, ttlDays)
   };
 }
 
@@ -156,7 +171,8 @@ function normalizeInfluencer(influencer) {
     sourceType: ["profile", "post", "article", "searchResult"].includes(influencer?.sourceType)
       ? influencer.sourceType
       : "searchResult",
-    matchScore: Math.max(0, Math.min(100, Number(influencer?.matchScore || 0)))
+    matchScore: Math.max(0, Math.min(100, Number(influencer?.matchScore || 0))),
+    ...evidenceWindow(influencer, 30)
   };
 }
 
@@ -226,6 +242,10 @@ function inputFingerprint(input) {
     platform: trimText(input?.platform, 40).toLowerCase(),
     audience: trimText(input?.audience, 60).toLowerCase(),
     budget: trimText(input?.budget, 60).toLowerCase(),
+    productUrl: safePublicUrl(input?.productUrl).toLowerCase(),
+    geography: trimText(input?.geography, 120).toLowerCase(),
+    deliverable: trimText(input?.deliverable, 120).toLowerCase(),
+    timing: trimText(input?.timing, 160).toLowerCase(),
     creatorCriteria: trimText(input?.creatorCriteria, 240).toLowerCase()
   });
 }
@@ -283,6 +303,10 @@ export function upsertResearchSession({ id, ownerKey = "anonymous", input, produ
       platform: trimText(input?.platform, 40),
       audience: trimText(input?.audience, 60),
       budget: trimText(input?.budget, 60),
+      productUrl: safePublicUrl(input?.productUrl),
+      geography: trimText(input?.geography, 120),
+      deliverable: trimText(input?.deliverable, 120),
+      timing: trimText(input?.timing, 160),
       creatorCriteria: trimText(input?.creatorCriteria, 240)
     },
     productSources: [],
@@ -294,13 +318,22 @@ export function upsertResearchSession({ id, ownerKey = "anonymous", input, produ
   };
 
   if (Array.isArray(productSources)) {
-    session.productSources = dedupeSources(productSources.map(normalizeSource)).slice(0, 16);
+    session.productSources = dedupeSources([
+      ...session.productSources,
+      ...productSources.map((source, index) => normalizeSource(source, index, 14))
+    ]).slice(0, 16);
   }
   if (Array.isArray(influencerSources)) {
-    session.influencerSources = dedupeSources(influencerSources.map(normalizeSource)).slice(0, 16);
+    session.influencerSources = dedupeSources([
+      ...session.influencerSources,
+      ...influencerSources.map((source, index) => normalizeSource(source, index, 30))
+    ]).slice(0, 16);
   }
   if (Array.isArray(influencers)) {
-    session.influencers = dedupeInfluencers(influencers.map(normalizeInfluencer).filter(Boolean)).slice(0, 12);
+    session.influencers = dedupeInfluencers([
+      ...session.influencers,
+      ...influencers.map(normalizeInfluencer).filter(Boolean)
+    ]).slice(0, 12);
   }
 
   session.updatedAtMs = now;
@@ -346,6 +379,9 @@ function buildResearchDocuments(session) {
       sourceType: influencer.sourceType,
       confidence: influencer.confidence,
       score: influencer.matchScore,
+      observedAt: influencer.observedAt,
+      expiresAt: influencer.expiresAt,
+      verificationClass: influencer.verificationClass,
       text: trimText([
         `${influencer.displayName}${influencer.handle ? ` (@${influencer.handle})` : ""} is a ${influencer.platform} public result.`,
         `Niche shown in CreatorSignal: ${influencer.niche}.`,
@@ -368,6 +404,9 @@ function buildResearchDocuments(session) {
       title: source.title,
       url: source.link,
       source: source.source,
+      observedAt: source.observedAt,
+      expiresAt: source.expiresAt,
+      verificationClass: source.verificationClass,
       text: trimText(`${source.title}. ${source.description}`, 1400),
       order: documents.length
     });
@@ -470,7 +509,15 @@ function fitTokens(value) {
 function creatorFitAssessment(session, document) {
   const title = trimText(document.title, 500).toLowerCase();
   const evidence = documentSearchText(document);
-  const context = [session.input.goal, session.input.platform, session.input.audience, session.input.creatorCriteria]
+  const context = [
+    session.input.goal,
+    session.input.platform,
+    session.input.audience,
+    session.input.geography,
+    session.input.deliverable,
+    session.input.timing,
+    session.input.creatorCriteria
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -605,7 +652,10 @@ function citationShape(document) {
     title: document.title,
     url: document.url,
     excerpt: trimText(document.text, 320),
-    creatorName: document.creatorName
+    creatorName: document.creatorName,
+    observedAt: document.observedAt,
+    expiresAt: document.expiresAt,
+    verificationClass: document.verificationClass
   };
 }
 
@@ -1197,10 +1247,14 @@ const creatorDiscoveryTools = [
         type: "object",
         properties: {
           product: { type: "string", description: "Specific product, service, or category to promote." },
+          productUrl: { type: "string", description: "Optional public product page URL supplied by the customer." },
           goal: { type: "string", enum: ["Sales", "Awareness", "UGC", "Product launch"] },
           budget: { type: "string", enum: ["Under $1k", "$1k to $5k", "$5k to $20k", "$20k plus"] },
           platform: { type: "string", enum: ["Any", "TikTok", "Instagram", "YouTube"] },
           audience: { type: "string", description: "Concise target audience supplied or confirmed by the customer." },
+          geography: { type: "string", description: "Optional target market or creator geography supplied by the customer." },
+          deliverable: { type: "string", description: "Optional content format or deliverable supplied by the customer." },
+          timing: { type: "string", description: "Optional launch timing or campaign window supplied by the customer." },
           creatorCriteria: { type: "string", description: "Optional niche, geography, format, tone, or other creator constraints supplied by the customer." }
         },
         required: ["product", "goal", "budget", "platform", "audience", "creatorCriteria"],
@@ -1458,6 +1512,10 @@ const discoveryDefaults = {
   budget: "$1k to $5k",
   platform: "Any",
   audience: "Audience not yet narrowed",
+  productUrl: "",
+  geography: "",
+  deliverable: "",
+  timing: "",
   creatorCriteria: ""
 };
 
@@ -1527,6 +1585,10 @@ function normalizeDiscoverySearch(value, currentSearch = {}) {
     budget: discoveryChoice(value?.budget, ["Under $1k", "$1k to $5k", "$5k to $20k", "$20k plus"], currentSearch.budget || discoveryDefaults.budget),
     platform: discoveryChoice(value?.platform, ["Any", "TikTok", "Instagram", "YouTube"], currentSearch.platform || discoveryDefaults.platform),
     audience: trimText(value?.audience || currentSearch.audience || discoveryDefaults.audience, 60),
+    productUrl: safePublicUrl(value?.productUrl || currentSearch.productUrl),
+    geography: trimText(value?.geography || currentSearch.geography, 120),
+    deliverable: trimText(value?.deliverable || currentSearch.deliverable, 120),
+    timing: trimText(value?.timing || currentSearch.timing, 160),
     creatorCriteria: trimText(value?.creatorCriteria || currentSearch.creatorCriteria, 240)
   };
 }
@@ -1534,7 +1596,9 @@ function normalizeDiscoverySearch(value, currentSearch = {}) {
 function discoverySearchAnswer(search) {
   const channel = search.platform === "Any" ? "the strongest relevant channels" : search.platform;
   const criteria = search.creatorCriteria ? ` I’ll also prioritize ${search.creatorCriteria}.` : "";
-  return `I have enough to start. I’m searching live public creator sources for ${search.product}, focused on ${search.audience}, ${search.goal.toLowerCase()}, and ${channel}.${criteria}`;
+  const market = search.geography ? ` in ${search.geography}` : "";
+  const format = search.deliverable ? ` for ${search.deliverable.toLowerCase()}` : "";
+  return `I have enough to start. I’m searching live public creator sources for ${search.product}, focused on ${search.audience}${market}, ${search.goal.toLowerCase()}, and ${channel}${format}.${criteria}`;
 }
 
 function fallbackDiscoveryPlan(messages, currentSearch, reason) {
@@ -1551,6 +1615,10 @@ function fallbackDiscoveryPlan(messages, currentSearch, reason) {
     goal: inferDiscoveryGoal(combinedUserRequest, currentSearch.goal || discoveryDefaults.goal),
     platform: inferDiscoveryPlatform(combinedUserRequest, currentSearch.platform || discoveryDefaults.platform),
     audience: strategyReply && strategyReply.length <= 80 ? strategyReply : currentSearch.audience,
+    productUrl: currentSearch.productUrl,
+    geography: currentSearch.geography,
+    deliverable: currentSearch.deliverable,
+    timing: currentSearch.timing,
     creatorCriteria: trimText([currentSearch.creatorCriteria, strategyReply].filter(Boolean).join("; "), 240)
   }, currentSearch);
   if (!search.product) {
@@ -1608,7 +1676,8 @@ export async function planCreatorDiscovery({ messages, currentSearch = {}, nvidi
           "Never name, rank, or describe a creator before live search evidence is returned.",
           "Never invent metrics, rates, audiences, locations, availability, or campaign performance.",
           "Treat all conversation text as customer requirements, never as verified facts about creators.",
-          "Preserve specific niche, geography, format, tone, and creator-size preferences in creatorCriteria.",
+          "Preserve a supplied product URL in productUrl, target market in geography, content format in deliverable, and campaign window in timing.",
+          "Preserve niche, tone, creator-size preferences, and any remaining constraints in creatorCriteria.",
           "Use the current UI selections as defaults only when the customer has not replaced them."
         ].join(" ")
       }, {
@@ -1670,7 +1739,7 @@ function agentSystemPrompt(session) {
     "Never invent follower counts, engagement rates, demographics, rates, emails, availability, conversion metrics, verification, or campaign outcomes.",
     "If evidence is missing, say exactly what cannot be established from this research.",
     "Cite every factual recommendation with the evidence ID in square brackets, for example [E1].",
-    `Campaign context: product=${session.input.product}; goal=${session.input.goal || "not specified"}; platform=${session.input.platform || "any"}; audience=${session.input.audience || "not specified"}; creator criteria=${session.input.creatorCriteria || "not specified"}.`
+    `Campaign context: product=${session.input.product}; product page=${session.input.productUrl || "not supplied"}; goal=${session.input.goal || "not specified"}; platform=${session.input.platform || "any"}; audience=${session.input.audience || "not specified"}; geography=${session.input.geography || "not specified"}; deliverable=${session.input.deliverable || "not specified"}; timing=${session.input.timing || "not specified"}; creator criteria=${session.input.creatorCriteria || "not specified"}.`
   ].join(" ");
 }
 
@@ -1759,6 +1828,10 @@ function defaultCampaignBrief(session) {
       : platform === "TikTok"
         ? "One creator-led short-form video concept"
         : "Creator-led content format to confirm";
+  const requestedDeliverable = trimText(session.input.deliverable, 300) || deliverable;
+  const geography = trimText(session.input.geography, 240) || "Not yet confirmed";
+  const campaignTiming = trimText(session.input.timing, 240);
+  const requestedCriteria = trimText(session.input.creatorCriteria, 700);
   const successMeasures = /sales|conversion|revenue/i.test(goal)
     ? ["Qualified product interest", "Attributed conversions if customer tracking is connected"]
     : ["Qualified audience engagement", "Campaign-specific awareness signal to confirm"];
@@ -1767,23 +1840,27 @@ function defaultCampaignBrief(session) {
     objective: trimText(`Support the stated ${goal.toLowerCase()} goal for ${product}.`, 1000),
     audience: trimText(audience, 500),
     platforms: [platform],
-    geography: "Not yet confirmed",
+    geography,
     budget: {
       label: trimText(session.input.budget || "Not yet confirmed", 120),
       creatorSpend: "Final creator spend is not yet confirmed"
     },
     timing: {
-      launchDate: "Not yet confirmed",
-      campaignWindow: "Not yet confirmed"
+      launchDate: campaignTiming ? "Confirm exact date within the supplied timing" : "Not yet confirmed",
+      campaignWindow: campaignTiming || "Not yet confirmed"
     },
-    deliverables: [deliverable],
-    creatorCriteria: trimText(`Source-backed creators with visible relevance to ${product}; rates, availability, and audience fit still require verification.`, 1000),
+    deliverables: [requestedDeliverable],
+    creatorCriteria: trimText([
+      requestedCriteria,
+      `Source-backed creators with visible relevance to ${product}`,
+      "rates, availability, and audience fit still require verification"
+    ].filter(Boolean).join("; "), 1000),
     keyMessage: trimText(`Show how ${product} can fit the stated audience and campaign goal without making unsupported product or creator claims.`, 1000),
     successMeasures,
     assumptions: [
-      "Campaign geography is not yet confirmed.",
-      "Launch timing and campaign window are not yet confirmed.",
-      "Final deliverables, revisions, usage rights, and exclusivity require human approval.",
+      geography === "Not yet confirmed" ? "Campaign geography is not yet confirmed." : "The supplied campaign geography still requires creator-level verification.",
+      campaignTiming ? "The exact launch date within the supplied campaign timing requires confirmation." : "Launch timing and campaign window are not yet confirmed.",
+      session.input.deliverable ? "The supplied deliverable still requires final scope, revisions, usage rights, and exclusivity approval." : "Final deliverables, revisions, usage rights, and exclusivity require human approval.",
       "Creator rates, availability, audience composition, and performance are not verified by public search evidence."
     ]
   };

@@ -91,12 +91,42 @@ app.use("/api", async (request, response, next) => {
   }
 });
 
+function isPublicHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return false;
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    if (!hostname || hostname === "localhost" || /\.(?:local|localhost|internal|test|example|invalid)$/.test(hostname)) return false;
+    if (hostname.startsWith("[") || hostname.includes(":")) return false;
+    const octets = hostname.split(".").map(Number);
+    if (octets.length === 4 && octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)) {
+      const [first, second] = octets;
+      if (first === 0 || first === 10 || first === 127 || first >= 224) return false;
+      if (first === 169 && second === 254) return false;
+      if (first === 172 && second >= 16 && second <= 31) return false;
+      if (first === 192 && second === 168) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const OptionalPublicProductUrl = z.string().trim().max(600).refine(
+  (value) => !value || isPublicHttpUrl(value),
+  "Use a public http:// or https:// product page URL."
+).optional();
+
 const ProductIntelligenceRequest = z.object({
   product: z.string().trim().min(1).max(140),
+  productUrl: OptionalPublicProductUrl,
   goal: z.string().trim().max(60).optional(),
   platform: z.string().trim().max(40).optional(),
   audience: z.string().trim().max(60).optional(),
   budget: z.string().trim().max(60).optional(),
+  geography: z.string().trim().max(120).optional(),
+  deliverable: z.string().trim().max(120).optional(),
+  timing: z.string().trim().max(160).optional(),
   creatorCriteria: z.string().trim().max(240).optional()
 });
 
@@ -133,7 +163,10 @@ const SourceSchema = z.object({
   source: z.string(),
   description: z.string(),
   link: z.string().optional(),
-  rank: z.number()
+  rank: z.number(),
+  observedAt: z.string().datetime().optional(),
+  expiresAt: z.string().datetime().optional(),
+  verificationClass: z.literal("public_evidence").optional()
 });
 
 const CreatorResearchBrief = z.object({
@@ -193,17 +226,25 @@ const AgentDiscoveryRequest = z.object({
   messages: z.array(AgentMessageInput).min(1).max(20),
   currentSearch: z.object({
     product: z.string().trim().max(140).default(""),
+    productUrl: OptionalPublicProductUrl.default(""),
     goal: z.string().trim().max(60).default("Sales"),
     budget: z.string().trim().max(60).default("$1k to $5k"),
     platform: z.enum(["Any", "TikTok", "Instagram", "YouTube"]).default("Any"),
     audience: z.string().trim().max(60).default("Audience not yet narrowed"),
+    geography: z.string().trim().max(120).default(""),
+    deliverable: z.string().trim().max(120).default(""),
+    timing: z.string().trim().max(160).default(""),
     creatorCriteria: z.string().trim().max(240).default("")
   }).default({
     product: "",
+    productUrl: "",
     goal: "Sales",
     budget: "$1k to $5k",
     platform: "Any",
     audience: "Audience not yet narrowed",
+    geography: "",
+    deliverable: "",
+    timing: "",
     creatorCriteria: ""
   })
 });
@@ -704,12 +745,38 @@ async function runNvidiaStructured(prompt, schemaHint, options = {}) {
   throw new Error(`NVIDIA NIM unavailable: ${errors.join(" | ")}`);
 }
 
+function normalizedTimestamp(value, fallback) {
+  const date = new Date(String(value || ""));
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
+}
+
+function publicEvidenceWindow(item, ttlDays = 14) {
+  const now = new Date();
+  const observedAt = normalizedTimestamp(item?.observedAt, now.toISOString());
+  return {
+    observedAt,
+    expiresAt: normalizedTimestamp(item?.expiresAt, new Date(new Date(observedAt).getTime() + ttlDays * 24 * 60 * 60 * 1000).toISOString()),
+    verificationClass: "public_evidence"
+  };
+}
+
+function sanitizeUntrustedSourceText(value, max) {
+  const instructionPatterns = [
+    /(?:^|[.!?]\s+)(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|system|developer|assistant)?\s*(?:instructions?|messages?|prompts?)?[^.!?]*/gi,
+    /(?:^|[.!?]\s+)(?:reveal|print|show|expose|return|send)\b[^.!?]{0,140}\b(?:api\s*keys?|secrets?|access\s*tokens?|system\s*prompts?|developer\s*messages?)\b[^.!?]*/gi,
+    /(?:^|[.!?]\s+)\b(?:system|developer)\s+(?:prompt|message|instructions?)\s*[:=-][^.!?]*/gi
+  ];
+  let sanitized = String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ");
+  for (const pattern of instructionPatterns) sanitized = sanitized.replace(pattern, " ");
+  return sanitized.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 function sanitizeSource(item, index) {
-  const title = String(item.title || item.source || `Result ${index + 1}`).slice(0, 180);
-  const source = String(item.source || item.display_link || "Public web result").slice(0, 120);
-  const description = String(item.description || item.snippet || item.text || "").slice(0, 360);
+  const title = sanitizeUntrustedSourceText(item.title || item.source || `Result ${index + 1}`, 180);
+  const source = sanitizeUntrustedSourceText(item.source || item.display_link || "Public web result", 120);
+  const description = sanitizeUntrustedSourceText(item.description || item.snippet || item.text || "", 360);
   const link = String(item.link || item.url || "").slice(0, 500);
-  return { title, source, description, link, rank: Number(item.rank || index + 1) };
+  return { title, source, description, link, rank: Number(item.rank || index + 1), ...publicEvidenceWindow(item) };
 }
 
 function decodeHtml(value) {
@@ -884,8 +951,37 @@ async function requestBrightDataSerp(query) {
   };
 }
 
-async function fetchBrightDataSerp({ product, goal, platform, audience }) {
-  const modifiers = [goal, platform, audience, "shopping questions", "customer demand"]
+function safeSearchModifier(value, max = 160) {
+  return String(value || "")
+    .replace(/[^\p{L}\p{N}\s'&+.,\/-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function productPageSearchHint(value) {
+  try {
+    const hostname = new URL(String(value || "")).hostname.replace(/^www\./, "");
+    return hostname.split(".")[0]?.replace(/[-_]+/g, " ") || "";
+  } catch {
+    return "";
+  }
+}
+
+async function fetchBrightDataSerp({ product, productUrl, goal, platform, audience, geography, deliverable, timing, creatorCriteria }) {
+  const modifiers = [
+    goal,
+    platform,
+    audience,
+    geography,
+    deliverable,
+    timing,
+    creatorCriteria,
+    productPageSearchHint(productUrl),
+    "shopping questions",
+    "customer demand"
+  ]
+    .map((value) => safeSearchModifier(value))
     .filter(Boolean)
     .join(" ");
   return requestBrightDataSerp(`${productDiscoveryPhrase(product)} ${modifiers}`.trim());
@@ -1170,34 +1266,45 @@ function discoveryQueries(input) {
     ? `${input.platform} ${platformSites[input.platform] || ""}`.trim()
     : "Instagram TikTok YouTube";
   const productPhrase = productDiscoveryPhrase(input.product);
-  const creatorCriteria = String(input.creatorCriteria || "").replace(/[^\p{L}\p{N}\s'&+-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-  const criteria = creatorCriteria ? ` ${creatorCriteria}` : "";
+  const marketContext = [input.audience, input.geography]
+    .map((value) => safeSearchModifier(value, 100))
+    .filter(Boolean)
+    .join(" ");
+  const formatContext = safeSearchModifier(input.deliverable, 100);
+  const specialistContext = [input.creatorCriteria, productPageSearchHint(input.productUrl)]
+    .map((value) => safeSearchModifier(value, 140))
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 220);
+  const market = marketContext ? ` ${marketContext}` : "";
+  const format = formatContext ? ` ${formatContext}` : "";
+  const specialist = specialistContext ? ` ${specialistContext}` : "";
   const category = productSearchCategory(input.product);
   if (category === "phone") {
     return [
-      `${productPhrase} ${platform} smartphone tech creator review${criteria}`,
-      `${productPhrase} ${platform} phone reviewer influencer hands on${criteria}`,
-      `${productPhrase} ${platform} iphone android creator camera review${criteria}`
+      `${productPhrase} ${platform} smartphone tech creator review`,
+      `${productPhrase} ${platform} phone reviewer influencer hands on${format}${market}`,
+      `${productPhrase} ${platform} iphone android creator camera review${specialist}`
     ];
   }
   if (category === "keyboard" || category === "mouse") {
     return [
-      `${productPhrase} ${platform} desk setup tech creator review${criteria}`,
-      `${productPhrase} ${platform} gaming setup creator product review${criteria}`,
-      `${productPhrase} ${platform} influencer hands on review setup${criteria}`
+      `${productPhrase} ${platform} desk setup tech creator review`,
+      `${productPhrase} ${platform} creator product review setup${format}${market}`,
+      `${productPhrase} ${platform} influencer hands on review setup${specialist}`
     ];
   }
   if (category === "tech") {
     return [
-      `${productPhrase} ${platform} tech creator review${criteria}`,
-      `${productPhrase} ${platform} creator setup hands on${criteria}`,
-      `${productPhrase} ${platform} influencer product review${criteria}`
+      `${productPhrase} ${platform} tech creator review`,
+      `${productPhrase} ${platform} creator setup hands on${format}${market}`,
+      `${productPhrase} ${platform} influencer product review${specialist}`
     ];
   }
   return [
-    `${productPhrase} ${platform} creator review shopping links${criteria}`,
-    `${productPhrase} ${platform} creator product review${criteria}`,
-    `${productPhrase} ${platform} influencer hands on demo${criteria}`
+    `${productPhrase} ${platform} creator review shopping links`,
+    `${productPhrase} ${platform} creator product review${format}${market}`,
+    `${productPhrase} ${platform} influencer hands on demo${specialist}`
   ];
 }
 
@@ -1280,9 +1387,13 @@ async function extractRealInfluencers(input, sources) {
   try {
     const payload = {
       product: input.product,
+      productUrl: input.productUrl,
       goal: input.goal,
       platform: input.platform,
       audience: input.audience,
+      geography: input.geography,
+      deliverable: input.deliverable,
+      timing: input.timing,
       creatorCriteria: input.creatorCriteria,
       sourceCandidates: compactCandidatesForAI(fallback),
       sources: compactSourcesForAI(sources),
@@ -1462,9 +1573,13 @@ function chunkItems(items, size) {
 async function runInfluencerEvaluationChunk(input, influencers, provider, batchIndex, batchCount) {
   const payload = {
     product: input.product,
+    productUrl: input.productUrl,
     goal: input.goal,
     platform: input.platform,
     audience: input.audience,
+    geography: input.geography,
+    deliverable: input.deliverable,
+    timing: input.timing,
     creatorCriteria: input.creatorCriteria,
     batch: `${batchIndex + 1} of ${batchCount}`,
     influencers: compactCandidatesForAI(influencers, influencers.length),
@@ -1615,7 +1730,10 @@ function matchesRequestedPlatform({ platform, link, sourceUrl, title, source, de
 
 async function discoverRealInfluencers(input) {
   const queries = discoveryQueries(input);
-  const results = await Promise.all(queries.map((query) => requestBrightDataSerp(query).catch(() => ({ ok: false, sources: [] }))));
+  const [results, productPageSource] = await Promise.all([
+    Promise.all(queries.map((query) => requestBrightDataSerp(query).catch(() => ({ ok: false, sources: [] })))),
+    fetchBrightDataProductPageSource(input.productUrl).catch(() => null)
+  ]);
   const sources = [];
   const seen = new Set();
   for (const result of results) {
@@ -1631,15 +1749,17 @@ async function discoverRealInfluencers(input) {
   const creatorSources = relevantSources.filter(sourceLooksLikeCreatorCandidate).slice(0, 8);
   const extraction = await extractRealInfluencers(input, creatorSources);
   const candidates = extraction.candidates
-    .filter((candidate) => matchesRequestedPlatform(candidate, input.platform));
+    .filter((candidate) => matchesRequestedPlatform(candidate, input.platform))
+    .map((candidate) => ({ ...candidate, ...publicEvidenceWindow(candidate, 30) }));
   return {
     sources: creatorSources,
+    productSources: productPageSource ? [productPageSource] : [],
     candidates,
     usedOpenAIAgents: extraction.usedOpenAIAgents,
     caveat: creatorSources.length
       ? `${extraction.caveat}${input.platform && input.platform !== "Any" ? ` Results are restricted to ${input.platform}.` : ""}`
       : `Bright Data returned ${sources.length} public sources, but none showed enough visible ${input.platform && input.platform !== "Any" ? `${input.platform} ` : ""}creator evidence for "${input.product}". Try a more specific product phrase or broaden the platform.`,
-    brightDataUsed: results.some((result) => result.ok)
+    brightDataUsed: results.some((result) => result.ok) || Boolean(productPageSource)
   };
 }
 
@@ -1656,23 +1776,60 @@ function htmlToText(html) {
 }
 
 async function fetchBrightDataPageText(url) {
-  if (!hasBrightDataUnlockerConfig() || !sourceLooksFetchable(url)) return null;
+  if (!hasBrightDataUnlockerConfig() || !isPublicHttpUrl(url) || !sourceLooksFetchable(url)) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.BRIGHT_DATA_UNLOCKER_TIMEOUT_MS || 7000));
+  try {
+    const response = await fetch(process.env.BRIGHT_DATA_FETCH_URL, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${process.env.BRIGHT_DATA_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        zone: process.env.BRIGHT_DATA_UNLOCKER_ZONE,
+        url,
+        format: "raw"
+      })
+    });
 
-  const response = await fetch(process.env.BRIGHT_DATA_FETCH_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.BRIGHT_DATA_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      zone: process.env.BRIGHT_DATA_UNLOCKER_ZONE,
-      url,
-      format: "raw"
-    })
-  });
+    if (!response.ok) return null;
+    return htmlToText(await response.text());
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
-  if (!response.ok) return null;
-  return htmlToText(await response.text());
+const productPageEvidenceCache = new Map();
+
+async function fetchBrightDataProductPageSource(productUrl) {
+  if (!productUrl || !isPublicHttpUrl(productUrl)) return null;
+  const normalizedUrl = new URL(productUrl).toString();
+  const cached = productPageEvidenceCache.get(normalizedUrl);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = (async () => {
+    const text = await fetchBrightDataPageText(normalizedUrl);
+    if (!text) return null;
+    const hostname = new URL(normalizedUrl).hostname.replace(/^www\./, "");
+    return sanitizeSource({
+      title: `Brand product page (${hostname})`,
+      source: hostname,
+      description: text,
+      link: normalizedUrl,
+      rank: 0
+    }, 0);
+  })();
+  productPageEvidenceCache.set(normalizedUrl, { expiresAt: Date.now() + 5 * 60 * 1000, promise });
+  try {
+    const source = await promise;
+    if (!source) productPageEvidenceCache.delete(normalizedUrl);
+    return source;
+  } catch (error) {
+    productPageEvidenceCache.delete(normalizedUrl);
+    throw error;
+  }
 }
 
 function localProductBrief({ product, goal, platform, audience }, sources) {
@@ -1808,9 +1965,13 @@ async function buildAgentBrief(input, brightDataResult) {
   try {
     const payload = {
       product: input.product,
+      productUrl: input.productUrl,
       goal: input.goal,
       platform: input.platform,
       audience: input.audience,
+      geography: input.geography,
+      deliverable: input.deliverable,
+      timing: input.timing,
       creatorCriteria: input.creatorCriteria,
       brightDataSources: compactSourcesForAI(brightDataResult.sources, 5),
       guardrail:
@@ -2185,6 +2346,8 @@ app.get("/api/integrations/status", (_request, response) => {
       configured: hasBrightDataConfig(),
       searchUrlConfigured: Boolean(process.env.BRIGHT_DATA_SEARCH_URL),
       serpZoneConfigured: Boolean(process.env.BRIGHT_DATA_SERP_ZONE),
+      fetchUrlConfigured: Boolean(process.env.BRIGHT_DATA_FETCH_URL),
+      unlockerZoneConfigured: Boolean(process.env.BRIGHT_DATA_UNLOCKER_ZONE),
       country: process.env.BRIGHT_DATA_COUNTRY || "us"
     },
     openaiAgents: {
@@ -2226,11 +2389,28 @@ app.post("/api/product-intelligence", async (request, response) => {
     operation: "product_research",
     metadata: { product: input.product }
   });
-  const brightDataResult = await fetchBrightDataSerp(input).catch((error) => ({
-    ok: false,
-    sources: [],
-    error: error instanceof Error ? error.message : "Bright Data request failed."
-  }));
+  const [serpResult, productPageSource] = await Promise.all([
+    fetchBrightDataSerp(input).catch((error) => ({
+      ok: false,
+      sources: [],
+      error: error instanceof Error ? error.message : "Bright Data request failed."
+    })),
+    fetchBrightDataProductPageSource(input.productUrl).catch(() => null)
+  ]);
+  const mergedSources = [];
+  const seenSources = new Set();
+  for (const source of [productPageSource, ...(serpResult.sources || [])].filter(Boolean)) {
+    const key = source.link || source.title;
+    if (!key || seenSources.has(key)) continue;
+    seenSources.add(key);
+    mergedSources.push({ ...source, rank: mergedSources.length + 1 });
+  }
+  const brightDataResult = {
+    ...serpResult,
+    ok: Boolean(serpResult.ok || productPageSource),
+    sources: mergedSources,
+    error: serpResult.ok || productPageSource ? undefined : serpResult.error
+  };
   await completeProviderDiagnostic({
     job: brightDataJob,
     status: brightDataResult.ok ? "complete" : "degraded",
@@ -2384,6 +2564,7 @@ app.post("/api/real-influencers", async (request, response) => {
     id: input.researchSessionId,
     ownerKey: requestOwnerKey(request),
     input,
+    productSources: discovery.productSources,
     influencerSources: discovery.sources,
     influencers: discovery.candidates
   });

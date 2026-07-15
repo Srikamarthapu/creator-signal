@@ -5,6 +5,7 @@ import {
   BookmarkPlus,
   BriefcaseBusiness,
   Check,
+  ChevronDown,
   CircleDollarSign,
   Copy,
   ExternalLink,
@@ -51,6 +52,7 @@ const goals = ["Sales", "Awareness", "UGC", "Product launch"];
 const budgets = ["Under $1k", "$1k to $5k", "$5k to $20k", "$20k plus"];
 const platforms: Array<Platform | "Any"> = ["Any", "TikTok", "Instagram", "YouTube"];
 const audiences = ["Gen Z", "Millennial", "Premium", "Budget"];
+const deliverables = ["", "Product review", "Tutorial or demo", "Unboxing", "Short-form UGC", "Product comparison", "Lifestyle integration"];
 type RealSortMode = "match" | "cost" | "risk" | "evidence";
 type RealIntentFilter = "Any" | "Shopping intent" | "Review/demo" | "Creator/UGC" | "Direct product fit";
 type RealQualityFilter = "Any" | "High confidence" | "Social source" | "Profile source" | "Article/list";
@@ -69,10 +71,14 @@ const avatarSizeClass = {
 
 const defaultSearch: SearchState = {
   product: "",
+  productUrl: "",
   goal: "Sales",
   budget: "$1k to $5k",
   platform: "Instagram",
   audience: "Millennial",
+  geography: "",
+  deliverable: "",
+  timing: "",
   creatorCriteria: ""
 };
 
@@ -81,7 +87,12 @@ function readStoredSearch() {
   return {
     ...defaultSearch,
     ...saved,
-    product: saved.product?.trim() || defaultSearch.product
+    product: saved.product?.trim() || defaultSearch.product,
+    productUrl: saved.productUrl?.trim() || "",
+    geography: saved.geography?.trim() || "",
+    deliverable: saved.deliverable?.trim() || "",
+    timing: saved.timing?.trim() || "",
+    creatorCriteria: saved.creatorCriteria?.trim() || ""
   };
 }
 
@@ -125,12 +136,75 @@ function normalizeSavedSearch(search: SavedResearchResponse["search"]): SearchSt
     : defaultSearch.platform;
   return {
     product: search.product.trim(),
+    productUrl: typeof search.productUrl === "string" ? search.productUrl.trim() : "",
     goal: typeof search.goal === "string" && search.goal.trim() ? search.goal : defaultSearch.goal,
     budget: typeof search.budget === "string" && search.budget.trim() ? search.budget : defaultSearch.budget,
     platform,
     audience: typeof search.audience === "string" && search.audience.trim() ? search.audience : defaultSearch.audience,
+    geography: typeof search.geography === "string" ? search.geography.trim() : "",
+    deliverable: typeof search.deliverable === "string" ? search.deliverable.trim() : "",
+    timing: typeof search.timing === "string" ? search.timing.trim() : "",
     creatorCriteria: typeof search.creatorCriteria === "string" ? search.creatorCriteria.trim() : ""
   };
+}
+
+function publicProductUrl(value: string | undefined) {
+  const input = String(value || "").trim();
+  if (!input) return "";
+  try {
+    const parsed = new URL(input);
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    const reserved = !hostname
+      || hostname === "localhost"
+      || /\.(?:local|localhost|internal|test|example|invalid)$/.test(hostname)
+      || hostname.startsWith("[")
+      || hostname.includes(":");
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password && !reserved
+      ? parsed.toString()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function searchRequestInput(search: SearchState) {
+  return {
+    product: search.product.trim(),
+    productUrl: publicProductUrl(search.productUrl) || undefined,
+    goal: search.goal,
+    platform: search.platform === "Any" ? undefined : search.platform,
+    audience: search.audience,
+    budget: search.budget,
+    geography: search.geography?.trim() || undefined,
+    deliverable: search.deliverable?.trim() || undefined,
+    timing: search.timing?.trim() || undefined,
+    creatorCriteria: search.creatorCriteria?.trim() || undefined
+  };
+}
+
+function formatEvidenceDate(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(date);
+}
+
+function evidenceFreshness(observedAt?: string, expiresAt?: string) {
+  const observed = formatEvidenceDate(observedAt);
+  const expiry = formatEvidenceDate(expiresAt);
+  const expired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
+  if (expired) return observed ? `Observed ${observed} / Refresh due` : "Refresh due";
+  if (observed && expiry) return `Observed ${observed} / Current through ${expiry}`;
+  if (observed) return `Observed ${observed}`;
+  return "Freshness not recorded";
+}
+
+function productPageHost(value?: string) {
+  try {
+    return new URL(String(value || "")).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
 
 async function responseError(response: Response, fallback: string) {
@@ -432,12 +506,7 @@ export default function App() {
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          product: nextSearch.product,
-          goal: nextSearch.goal,
-          platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
-          audience: nextSearch.audience,
-          budget: nextSearch.budget,
-          creatorCriteria: nextSearch.creatorCriteria,
+          ...searchRequestInput(nextSearch),
           researchSessionId,
           conversationId,
           organizationId: auth.activeOrganization?.id
@@ -473,12 +542,7 @@ export default function App() {
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          product: nextSearch.product,
-          goal: nextSearch.goal,
-          platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
-          audience: nextSearch.audience,
-          budget: nextSearch.budget,
-          creatorCriteria: nextSearch.creatorCriteria,
+          ...searchRequestInput(nextSearch),
           researchSessionId,
           organizationId: auth.activeOrganization?.id,
           influencers
@@ -518,12 +582,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          product: nextSearch.product,
-          goal: nextSearch.goal,
-          platform: nextSearch.platform === "Any" ? undefined : nextSearch.platform,
-          audience: nextSearch.audience,
-          budget: nextSearch.budget,
-          creatorCriteria: nextSearch.creatorCriteria,
+          ...searchRequestInput(nextSearch),
           researchSessionId,
           conversationId,
           organizationId: auth.activeOrganization?.id
@@ -552,7 +611,16 @@ export default function App() {
   };
 
   const startAgentResearch = (nextSearch: SearchState, researchSessionId: string, conversationId: string) => {
-    const normalizedSearch = { ...nextSearch, product: nextSearch.product.trim() };
+    const normalizedSearch = {
+      ...defaultSearch,
+      ...nextSearch,
+      product: nextSearch.product.trim(),
+      productUrl: publicProductUrl(nextSearch.productUrl),
+      geography: nextSearch.geography?.trim() || "",
+      deliverable: nextSearch.deliverable?.trim() || "",
+      timing: nextSearch.timing?.trim() || "",
+      creatorCriteria: nextSearch.creatorCriteria?.trim() || ""
+    };
     setValidationError("");
     setSortMode("match");
     setRiskFilter("Any");
@@ -615,7 +683,20 @@ export default function App() {
       setValidationError("Enter a product or category to start.");
       return;
     }
-    const nextSearch = { ...formState, product: formState.product.trim() };
+    if (formState.productUrl?.trim() && !publicProductUrl(formState.productUrl)) {
+      setValidationError("Enter a public product page URL beginning with http:// or https://.");
+      return;
+    }
+    const nextSearch = {
+      ...defaultSearch,
+      ...formState,
+      product: formState.product.trim(),
+      productUrl: publicProductUrl(formState.productUrl),
+      geography: formState.geography?.trim() || "",
+      deliverable: formState.deliverable?.trim() || "",
+      timing: formState.timing?.trim() || "",
+      creatorCriteria: formState.creatorCriteria?.trim() || ""
+    };
     setValidationError("");
     setSortMode("match");
     setRiskFilter("Any");
@@ -648,7 +729,7 @@ export default function App() {
     if (realInfluencers.length || realInfluencersLoading || realInfluencerMeta) return;
     startResearch(searchState);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.activeOrganization?.id, auth.loading, auth.user?.id, auth.workspaceLoading, path, searchState.product, searchState.goal, searchState.platform, searchState.audience, searchState.creatorCriteria]);
+  }, [auth.activeOrganization?.id, auth.loading, auth.user?.id, auth.workspaceLoading, path, searchState.product, searchState.productUrl, searchState.goal, searchState.platform, searchState.audience, searchState.geography, searchState.deliverable, searchState.timing, searchState.creatorCriteria]);
 
   return (
     <div className="min-h-dvh bg-mist text-ink">
@@ -893,6 +974,14 @@ function SearchScreen({
   submitSearch: (event: FormEvent) => void;
   integrationStatus: IntegrationStatus | null;
 }) {
+  const hasCampaignDetails = Boolean(
+    formState.productUrl?.trim()
+    || formState.geography?.trim()
+    || formState.deliverable?.trim()
+    || formState.timing?.trim()
+    || formState.creatorCriteria?.trim()
+  );
+  const [detailsOpen, setDetailsOpen] = useState(hasCampaignDetails);
   return (
     <section className="showcase-grid">
       <div className="hero-panel">
@@ -952,6 +1041,85 @@ function SearchScreen({
               options={audiences}
               onChange={(audience) => setFormState({ ...formState, audience })}
             />
+          </div>
+
+          <div className="campaign-details-disclosure">
+            <button
+              className="campaign-details-toggle"
+              type="button"
+              aria-expanded={detailsOpen}
+              aria-controls="campaign-details-fields"
+              onClick={() => setDetailsOpen((open) => !open)}
+            >
+              <span>
+                <SlidersHorizontal className="h-4 w-4" />
+                Campaign details
+              </span>
+              <span className="campaign-details-toggle-state">
+                {hasCampaignDetails ? "Added" : "Optional"}
+                <ChevronDown className={`h-4 w-4 transition-transform ${detailsOpen ? "rotate-180" : ""}`} />
+              </span>
+            </button>
+
+            {detailsOpen ? (
+              <div id="campaign-details-fields" className="campaign-details-fields">
+                <label className="campaign-detail-field campaign-detail-field-wide" htmlFor="product-page-url">
+                  <span>Product page URL</span>
+                  <input
+                    id="product-page-url"
+                    type="url"
+                    inputMode="url"
+                    value={formState.productUrl || ""}
+                    onChange={(event) => setFormState({ ...formState, productUrl: event.target.value })}
+                    placeholder="https://brand.com/products/product-name"
+                  />
+                </label>
+                <label className="campaign-detail-field" htmlFor="campaign-geography">
+                  <span>Target market</span>
+                  <input
+                    id="campaign-geography"
+                    value={formState.geography || ""}
+                    onChange={(event) => setFormState({ ...formState, geography: event.target.value })}
+                    placeholder="United States, English-speaking"
+                    maxLength={120}
+                  />
+                </label>
+                <label className="campaign-detail-field" htmlFor="campaign-deliverable">
+                  <span>Content deliverable</span>
+                  <select
+                    id="campaign-deliverable"
+                    value={formState.deliverable || ""}
+                    onChange={(event) => setFormState({ ...formState, deliverable: event.target.value })}
+                  >
+                    {deliverables.map((deliverable) => (
+                      <option key={deliverable || "any"} value={deliverable}>
+                        {deliverable || "Any content format"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="campaign-detail-field" htmlFor="campaign-timing">
+                  <span>Campaign timing</span>
+                  <input
+                    id="campaign-timing"
+                    value={formState.timing || ""}
+                    onChange={(event) => setFormState({ ...formState, timing: event.target.value })}
+                    placeholder="September launch, four-week window"
+                    maxLength={160}
+                  />
+                </label>
+                <label className="campaign-detail-field" htmlFor="creator-requirements">
+                  <span>Creator requirements</span>
+                  <input
+                    id="creator-requirements"
+                    value={formState.creatorCriteria || ""}
+                    onChange={(event) => setFormState({ ...formState, creatorCriteria: event.target.value })}
+                    placeholder="Micro creators, review-led, family-safe"
+                    maxLength={240}
+                  />
+                </label>
+              </div>
+            ) : null}
           </div>
         </form>
 
@@ -1067,6 +1235,14 @@ function ResultsScreen({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const showRealResults = realInfluencers.length > 0;
   const product = searchState.product || formState.product || "";
+  const searchContext = [
+    searchState.audience ? `Audience: ${searchState.audience}` : "",
+    searchState.geography ? `Market: ${searchState.geography}` : "",
+    searchState.deliverable ? `Format: ${searchState.deliverable}` : "",
+    searchState.timing ? `Timing: ${searchState.timing}` : "",
+    searchState.creatorCriteria ? `Creator fit: ${searchState.creatorCriteria}` : "",
+    productPageHost(searchState.productUrl) ? `Product page: ${productPageHost(searchState.productUrl)}` : ""
+  ].filter(Boolean);
   const countMatching = (predicate: (influencer: RealInfluencer) => boolean) => realInfluencers.filter(predicate).length;
   const platformOptions = useMemo(() => {
     const values = [...new Set(realInfluencers.map((influencer) => influencer.platform).filter(Boolean))].sort();
@@ -1174,6 +1350,11 @@ function ResultsScreen({
             </form>
           </div>
           {validationError ? <p className="error-text mt-3">{validationError}</p> : null}
+          {searchContext.length ? (
+            <div className="search-context-row" aria-label="Active campaign context">
+              {searchContext.map((item) => <span key={item}>{item}</span>)}
+            </div>
+          ) : null}
           <div className="toolbar-strip mt-5">
             <button className="secondary-button" type="button" onClick={refreshRealInfluencers} disabled={realInfluencersLoading}>
               {realInfluencersLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
@@ -1481,6 +1662,7 @@ function RealInfluencerCard({
   const displayScore = evaluation?.aiScore ?? influencer.matchScore;
   const isAIScored = evaluation?.scoringMethod === "ai";
   const scoreLabel = isAIScored ? "AI fit score" : evaluationLoading ? "AI scoring" : "Source score";
+  const evidenceExpired = influencer.expiresAt ? new Date(influencer.expiresAt).getTime() <= Date.now() : false;
   return (
     <article className="creator-card">
       <div className="creator-card-header">
@@ -1551,6 +1733,10 @@ function RealInfluencerCard({
         <p className="eyebrow">Source-backed evidence</p>
         <p className="mt-2 text-sm font-semibold">{influencer.sourceTitle}</p>
         <p className="mt-2 text-sm leading-6 text-muted">{influencer.sourceDescription}</p>
+        <p className={`evidence-freshness ${evidenceExpired ? "evidence-freshness-due" : ""}`}>
+          <ShieldCheck className="h-3.5 w-3.5" />
+          <span>{evidenceFreshness(influencer.observedAt, influencer.expiresAt)}</span>
+        </p>
         {buyerSignals.length ? (
           <div className="mt-3">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-signal-700">Buyer signals used by filters</p>
@@ -1727,7 +1913,10 @@ function ProductIntelligencePanel({
                     target="_blank"
                     rel="noreferrer"
                   >
-                    <span>{source.title}</span>
+                    <span className="min-w-0">
+                      <strong>{source.title}</strong>
+                      <small>{evidenceFreshness(source.observedAt, source.expiresAt)}</small>
+                    </span>
                     <ExternalLink className="h-3.5 w-3.5" />
                   </a>
                 ))}
@@ -1771,7 +1960,9 @@ function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
         <ReadinessRow
           label="Bright Data"
           ready={Boolean(status?.brightData.configured)}
-          detail={status?.brightData.configured ? `Live public search ready for ${status.brightData.country.toUpperCase()}` : "Live source search is not configured"}
+          detail={status?.brightData.configured
+            ? `Live public search ready for ${status.brightData.country.toUpperCase()}${status.brightData.fetchUrlConfigured && status.brightData.unlockerZoneConfigured ? " with product-page reads" : ""}`
+            : "Live source search is not configured"}
         />
         <ReadinessRow
           label="AI research agent"

@@ -363,6 +363,7 @@ export function CampaignCopilot({
         actions: data.actions,
         outreachDraft: data.outreachDraft,
         creatorComparison: data.creatorComparison,
+        budgetPlan: data.budgetPlan,
         toolsUsed: data.toolsUsed,
         providerUsed: data.providerUsed,
         model: data.model,
@@ -628,6 +629,41 @@ export function CampaignCopilot({
                           ))}
                         </div>
                         <p className="copilot-comparison-disclaimer">{message.creatorComparison.disclaimer}</p>
+                      </section>
+                    ) : null}
+                    {message.budgetPlan ? (
+                      <section className="copilot-budget-plan" aria-label="Campaign budget guardrail">
+                        <div className="copilot-budget-heading">
+                          <span>
+                            <strong>{message.budgetPlan.title}</strong>
+                            <small>Planning only · no estimated creator rates</small>
+                          </span>
+                        </div>
+                        <div className="copilot-budget-summary">
+                          <small>Campaign budget</small>
+                          <strong>{message.budgetPlan.budgetLabel}</strong>
+                          <p>{message.budgetPlan.equalSplitLabel}</p>
+                          <p>{message.budgetPlan.creatorSpendStatus}</p>
+                        </div>
+                        <div className="copilot-budget-candidates">
+                          {message.budgetPlan.candidates.map((candidate) => (
+                            <div className="copilot-budget-candidate" key={`${candidate.evidenceId}-${candidate.sourceUrl}`}>
+                              <span className="copilot-comparison-rank">{candidate.rank}</span>
+                              <span className="min-w-0 flex-1">
+                                <strong>{candidate.creatorName}</strong>
+                                <small>{candidate.visibleFit} visible fit · {candidate.rateStatus}</small>
+                              </span>
+                              <a href={candidate.sourceUrl} target="_blank" rel="noreferrer" aria-label={`Open evidence for ${candidate.creatorName}`}>
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="copilot-budget-exclusions">
+                          <small>Set aside before offers</small>
+                          <ul>{message.budgetPlan.excludedCosts.map((cost) => <li key={cost}>{cost}</li>)}</ul>
+                        </div>
+                        <p className="copilot-budget-disclaimer">{message.budgetPlan.disclaimer}</p>
                       </section>
                     ) : null}
                     {message.outreachDraft ? (

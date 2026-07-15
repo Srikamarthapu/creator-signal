@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(18);
+SELECT plan(19);
 
 insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data)
 values
@@ -114,6 +114,10 @@ update public.conversation_messages
 set artifacts = '[{"type":"outreach_draft","version":1,"creator_name":"Workspace Gear","subject":"Workspace collaboration","body":"A source-backed draft.","source_url":"https://example.test/workspace-gear","evidence_id":"E1","status":"draft"},{"type":"creator_comparison","version":1,"title":"Workspace creator comparison","rows":[{"rank":1,"creator_name":"Workspace Gear","evidence_id":"E1","source_url":"https://example.test/workspace-gear","source_title":"Workspace gear review","visible_fit":"Strong","evidence_strength":"Medium","signals":["Visible review format"],"reason":"The public result matches the brief.","unverified":["Rates and availability"]}],"disclaimer":"Saved public evidence only."}]'::jsonb
 where id = 'a4000000-0000-4000-8000-000000000002';
 
+update public.conversation_messages
+set artifacts = artifacts || '[{"type":"budget_plan","version":1,"title":"Budget guardrail for 1 creator","budget_label":"$1k to $5k","planned_creator_count":1,"equal_split_label":"$1,000 to $5,000 per creator if the entire budget were split evenly.","creator_spend_status":"Creator compensation has not yet been separated.","candidates":[{"rank":1,"creator_name":"Workspace Gear","evidence_id":"E1","source_url":"https://example.test/workspace-gear","visible_fit":"Strong","rate_status":"Direct quote required"}],"excluded_costs":["Usage rights and exclusivity"],"disclaimer":"Planning guardrail, not a rate estimate."}]'::jsonb
+where id = 'a4000000-0000-4000-8000-000000000002';
+
 select throws_ok(
   $$update public.conversation_messages
     set artifacts = '{}'::jsonb
@@ -170,6 +174,11 @@ select is(
   (select artifacts -> 1 ->> 'type' from public.conversation_messages where id = 'a4000000-0000-4000-8000-000000000002'),
   'creator_comparison',
   'workspace members can restore a structured creator comparison from agent memory'
+);
+select is(
+  (select artifacts -> 2 ->> 'type' from public.conversation_messages where id = 'a4000000-0000-4000-8000-000000000002'),
+  'budget_plan',
+  'workspace members can restore a structured budget guardrail from agent memory'
 );
 select is((select count(*)::integer from public.agent_runs), 1, 'workspace A sees only its model runs');
 select is((select count(*)::integer from public.agent_tool_calls), 1, 'workspace A sees only its tool traces');

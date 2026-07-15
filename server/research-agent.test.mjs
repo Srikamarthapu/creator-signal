@@ -554,6 +554,46 @@ test("campaign chat builds a structured comparison from current creator evidence
   assert.deepEqual(result.actions, []);
 });
 
+test("campaign chat calculates a budget guardrail without estimating creator rates", async () => {
+  const budgetCreators = [influencer, {
+    ...influencer,
+    displayName: "Work Tech",
+    handle: "worktech",
+    sourceUrl: "https://www.youtube.com/watch?v=work-tech-budget",
+    sourceTitle: "Wireless mouse review for remote work"
+  }, {
+    ...influencer,
+    displayName: "Game Desk",
+    handle: "gamedesk",
+    sourceUrl: "https://www.youtube.com/watch?v=game-desk-budget",
+    sourceTitle: "Gaming mouse desk setup"
+  }];
+  const session = upsertResearchSession({
+    id: "ac248fa5-37f9-47f7-81d4-f4448200ca63",
+    input: { ...input, budget: "$1k to $5k" },
+    influencerSources: [],
+    influencers: budgetCreators
+  });
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Can we afford three creators with this budget?" }],
+    nvidia: { apiKey: "should-not-be-called" },
+    fetchImpl: async () => {
+      throw new Error("Budget planning must not call the model.");
+    }
+  });
+
+  assert.equal(result.providerUsed, false);
+  assert.equal(result.toolsUsed[0].name, "estimate_budget_band");
+  assert.equal(result.budgetPlan.budgetLabel, "$1k to $5k");
+  assert.equal(result.budgetPlan.plannedCreatorCount, 3);
+  assert.match(result.budgetPlan.equalSplitLabel, /\$333 to \$1,666 per creator/i);
+  assert.ok(result.budgetPlan.candidates.every((candidate) => candidate.rateStatus === "Direct quote required"));
+  assert.match(result.budgetPlan.disclaimer, /not a creator rate estimate/i);
+  assert.doesNotMatch(result.answer, /they charge|their rate is|estimated rate/i);
+  assert.deepEqual(result.actions, []);
+});
+
 test("GLM outreach requires the selected creator citation", async () => {
   const session = createSession();
   const responses = [

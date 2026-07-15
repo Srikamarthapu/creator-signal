@@ -756,6 +756,82 @@
     @apply border-t border-line bg-mist px-3 py-2 text-[10px] leading-4 text-muted;
   }
 
+  .copilot-budget-plan {
+    @apply mt-4 overflow-hidden rounded-lg border border-line bg-white;
+  }
+
+  .copilot-budget-heading {
+    @apply border-b border-line bg-mist px-3 py-3;
+  }
+
+  .copilot-budget-heading strong,
+  .copilot-budget-heading small {
+    @apply block;
+  }
+
+  .copilot-budget-heading strong {
+    @apply text-xs font-semibold text-ink;
+  }
+
+  .copilot-budget-heading small {
+    @apply mt-0.5 text-[10px] text-muted;
+  }
+
+  .copilot-budget-summary {
+    @apply border-b border-line px-3 py-3;
+  }
+
+  .copilot-budget-summary > small,
+  .copilot-budget-exclusions > small {
+    @apply block text-[10px] font-semibold uppercase text-muted;
+  }
+
+  .copilot-budget-summary > strong {
+    @apply mt-1 block text-base font-semibold text-ink;
+  }
+
+  .copilot-budget-summary > p {
+    @apply mt-1 text-xs leading-5 text-ink;
+  }
+
+  .copilot-budget-summary > p:last-child {
+    @apply text-muted;
+  }
+
+  .copilot-budget-candidate {
+    @apply flex min-h-14 items-center gap-2.5 border-b border-line px-3 py-2.5;
+  }
+
+  .copilot-budget-candidate strong,
+  .copilot-budget-candidate small {
+    @apply block overflow-hidden text-ellipsis;
+  }
+
+  .copilot-budget-candidate strong {
+    @apply text-xs font-semibold text-ink;
+  }
+
+  .copilot-budget-candidate small {
+    @apply mt-0.5 text-[10px] text-muted;
+  }
+
+  .copilot-budget-candidate > a {
+    @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line text-muted transition-colors hover:border-signal-900 hover:text-signal-900;
+  }
+
+  .copilot-budget-exclusions {
+    @apply px-3 py-3;
+  }
+
+  .copilot-budget-exclusions ul {
+    @apply mt-1 space-y-1 pl-4 text-xs leading-5 text-ink;
+    list-style: disc;
+  }
+
+  .copilot-budget-disclaimer {
+    @apply border-t border-line bg-mist px-3 py-2 text-[10px] leading-4 text-muted;
+  }
+
   .copilot-outreach-heading {
     @apply flex min-h-12 items-center justify-between gap-3 border-b border-line bg-mist px-3 py-2;
   }

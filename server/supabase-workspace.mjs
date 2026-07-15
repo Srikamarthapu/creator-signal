@@ -416,6 +416,37 @@ function persistedMessageArtifacts(agentResult, researchRunId, allowedSourceUrls
     });
   }
 
+  const budgetPlan = agentResult?.budgetPlan;
+  if (budgetPlan) {
+    const candidates = Array.isArray(budgetPlan.candidates) ? budgetPlan.candidates.slice(0, 5) : [];
+    if (!candidates.length) throw new Error("Agent budget plan had no source-backed candidates.");
+    const persistedCandidates = candidates.map((candidate, index) => {
+      const sourceUrl = String(candidate?.sourceUrl || "").trim();
+      const evidenceId = String(candidate?.evidenceId || "").trim();
+      assertSourceBacked(sourceUrl, evidenceId, "Agent budget plan");
+      return {
+        rank: index + 1,
+        creator_name: String(candidate?.creatorName || "Creator").trim().slice(0, 160),
+        evidence_id: evidenceId,
+        source_url: sourceUrl,
+        visible_fit: ["Strong", "Moderate", "Exploratory"].includes(candidate?.visibleFit) ? candidate.visibleFit : "Exploratory",
+        rate_status: "Direct quote required"
+      };
+    });
+    artifacts.push({
+      type: "budget_plan",
+      version: 1,
+      title: String(budgetPlan.title || "Campaign budget guardrail").trim().slice(0, 200),
+      budget_label: String(budgetPlan.budgetLabel || "Not yet confirmed").trim().slice(0, 120),
+      planned_creator_count: persistedCandidates.length,
+      equal_split_label: String(budgetPlan.equalSplitLabel || "Confirm the budget before planning an allocation.").trim().slice(0, 500),
+      creator_spend_status: String(budgetPlan.creatorSpendStatus || "Creator compensation is not yet separated.").trim().slice(0, 500),
+      candidates: persistedCandidates,
+      excluded_costs: [...new Set((Array.isArray(budgetPlan.excludedCosts) ? budgetPlan.excludedCosts : []).map((item) => String(item).trim().slice(0, 180)).filter(Boolean))].slice(0, 6),
+      disclaimer: String(budgetPlan.disclaimer || "This is a planning guardrail, not a creator rate estimate.").trim().slice(0, 800)
+    });
+  }
+
   return artifacts;
 }
 
@@ -454,6 +485,30 @@ function clientCreatorComparison(artifacts) {
       unverified: Array.isArray(row?.unverified) ? row.unverified : []
     })),
     disclaimer: artifact.disclaimer || "This comparison is limited to saved public evidence."
+  };
+}
+
+function clientBudgetPlan(artifacts) {
+  const artifact = Array.isArray(artifacts)
+    ? artifacts.find((candidate) => candidate?.type === "budget_plan" && Array.isArray(candidate?.candidates))
+    : null;
+  if (!artifact) return undefined;
+  return {
+    title: artifact.title || "Campaign budget guardrail",
+    budgetLabel: artifact.budget_label || "Not yet confirmed",
+    plannedCreatorCount: Number(artifact.planned_creator_count || artifact.candidates.length),
+    equalSplitLabel: artifact.equal_split_label || "Confirm the budget before planning an allocation.",
+    creatorSpendStatus: artifact.creator_spend_status || "Creator compensation is not yet separated.",
+    candidates: artifact.candidates.slice(0, 5).map((candidate, index) => ({
+      rank: Number(candidate?.rank || index + 1),
+      creatorName: candidate?.creator_name || "Creator",
+      evidenceId: candidate?.evidence_id || "",
+      sourceUrl: candidate?.source_url || "",
+      visibleFit: candidate?.visible_fit || "Exploratory",
+      rateStatus: "Direct quote required"
+    })),
+    excludedCosts: Array.isArray(artifact.excluded_costs) ? artifact.excluded_costs : [],
+    disclaimer: artifact.disclaimer || "This is a planning guardrail, not a creator rate estimate."
   };
 }
 
@@ -954,6 +1009,7 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
       citations: Array.isArray(message.citations) ? message.citations : [],
       outreachDraft: clientOutreachDraft(message.artifacts),
       creatorComparison: clientCreatorComparison(message.artifacts),
+      budgetPlan: clientBudgetPlan(message.artifacts),
       actions: (actionRowsByAssistantMessage.get(message.id) || [])
         .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id))
         .map(clientAgentAction),

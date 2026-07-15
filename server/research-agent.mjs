@@ -579,8 +579,13 @@ function sourceBackedActionProposals(session, userMessage, citations) {
 
 function completeGroundedAgentTurn(session, userMessage, result) {
   const creatorComparison = sourceBackedCreatorComparison(session, userMessage?.content, result.citations);
-  const citations = creatorComparison
-    ? [...new Map([...(result.citations || []), ...creatorComparison.citations].map((citation) => [citation.url, citation])).values()]
+  const budgetPlan = sourceBackedBudgetPlan(session, userMessage?.content, result.citations);
+  const artifactCitations = [
+    ...(creatorComparison?.citations || []),
+    ...(budgetPlan?.citations || [])
+  ];
+  const citations = artifactCitations.length
+    ? [...new Map([...(result.citations || []), ...artifactCitations].map((citation) => [citation.url, citation])).values()]
     : result.citations;
   return {
     status: "ok",
@@ -591,6 +596,16 @@ function completeGroundedAgentTurn(session, userMessage, result) {
       title: creatorComparison.title,
       rows: creatorComparison.rows,
       disclaimer: creatorComparison.disclaimer
+    } } : {}),
+    ...(budgetPlan ? { budgetPlan: {
+      title: budgetPlan.title,
+      budgetLabel: budgetPlan.budgetLabel,
+      plannedCreatorCount: budgetPlan.plannedCreatorCount,
+      equalSplitLabel: budgetPlan.equalSplitLabel,
+      creatorSpendStatus: budgetPlan.creatorSpendStatus,
+      candidates: budgetPlan.candidates,
+      excludedCosts: budgetPlan.excludedCosts,
+      disclaimer: budgetPlan.disclaimer
     } } : {}),
     actions: sourceBackedActionProposals(session, userMessage, citations)
   };
@@ -667,6 +682,121 @@ function sourceBackedCreatorComparison(session, question, responseCitations = []
     rows,
     citations: selected.slice(0, targetCount).map((assessment) => citationShape(assessment.document)),
     disclaimer: "Visible fit is a relative comparison of this saved public evidence, not verified creator performance. Commercial terms and private analytics remain unverified."
+  };
+}
+
+function budgetPlanningIntent(question) {
+  return /\b(?:budget|costs?|spend|spending|afford|affordability|pricing|rates?|compensation|offer amount|pay|paying)\b/i.test(trimText(question, 2400));
+}
+
+function parseBudgetAmount(token) {
+  const match = String(token || "").toLowerCase().replaceAll(",", "").match(/(\d+(?:\.\d+)?)\s*([km])?/);
+  if (!match) return null;
+  const multiplier = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+  return Math.round(Number(match[1]) * multiplier);
+}
+
+function parseBudgetBand(label) {
+  const normalized = trimText(label, 120).toLowerCase();
+  const tokens = normalized.match(/\$?\s*\d+(?:[.,]\d+)?\s*[km]?/g) || [];
+  const amounts = tokens.map(parseBudgetAmount).filter((amount) => Number.isFinite(amount));
+  if (!amounts.length) return null;
+  if (/\b(?:under|below|less than|up to)\b/.test(normalized)) return { min: 0, max: amounts[0] };
+  if (/\b(?:plus|over|above|more than)\b|\+$/.test(normalized)) return { min: amounts[0], max: null };
+  if (amounts.length >= 2) return { min: Math.min(amounts[0], amounts[1]), max: Math.max(amounts[0], amounts[1]) };
+  return { min: amounts[0], max: amounts[0] };
+}
+
+function requestedBudgetCreatorCount(question, fallback) {
+  const normalized = trimText(question, 2400).toLowerCase();
+  const countPattern = (word, number) => new RegExp(`\\b(?:${word}|${number})\\b.{0,24}\\b(?:creators?|influencers?|candidates?|results?)\\b|\\b(?:creators?|influencers?|candidates?)\\b.{0,24}\\b(?:${word}|${number})\\b`).test(normalized);
+  if (countPattern("five", 5)) return 5;
+  if (countPattern("four", 4)) return 4;
+  if (countPattern("three", 3)) return 3;
+  if (countPattern("two|pair", 2)) return 2;
+  if (countPattern("one", 1)) return 1;
+  return fallback;
+}
+
+function formatUsd(amount) {
+  return `$${Math.max(0, Math.floor(Number(amount) || 0)).toLocaleString("en-US")}`;
+}
+
+function equalSplitBudgetLabel(band, count) {
+  if (!band || !count) return "Confirm the campaign budget before estimating a planning boundary.";
+  if (band.max === null) {
+    return `${formatUsd(band.min / count)}+ per creator if the entire starting budget were split evenly.`;
+  }
+  if (band.min === 0) {
+    return `Up to ${formatUsd(band.max / count)} per creator if the entire budget were split evenly.`;
+  }
+  if (band.min === band.max) {
+    return `${formatUsd(band.max / count)} per creator if the entire budget were split evenly.`;
+  }
+  return `${formatUsd(band.min / count)} to ${formatUsd(band.max / count)} per creator if the entire budget were split evenly.`;
+}
+
+function sourceBackedBudgetPlan(session, question, responseCitations = []) {
+  if (!budgetPlanningIntent(question)) return null;
+  const ranked = rankCreatorDocuments(session);
+  if (!ranked.length) return null;
+  const normalized = trimText(question, 2400).toLowerCase();
+  const named = ranked.filter((assessment) => questionMentionsCreator(assessment.document, normalized));
+  const assessmentById = new Map(ranked.map((assessment) => [assessment.document.id, assessment]));
+  const assessmentByUrl = new Map(ranked.map((assessment) => [safePublicUrl(assessment.document.url), assessment]));
+  const cited = [...new Map((Array.isArray(responseCitations) ? responseCitations : []).map((citation) => {
+    const assessment = assessmentById.get(trimText(citation?.id, 20)) || assessmentByUrl.get(safePublicUrl(citation?.url));
+    return assessment ? [assessment.document.id, assessment] : null;
+  }).filter(Boolean)).values()];
+  const fallbackCount = Math.min(3, ranked.length);
+  const targetCount = Math.max(1, Math.min(5, named.length || requestedBudgetCreatorCount(question, fallbackCount), ranked.length));
+  const selected = [...named, ...cited.filter((assessment) => !named.some((candidate) => candidate.document.id === assessment.document.id))];
+  for (const assessment of ranked) {
+    if (selected.some((candidate) => candidate.document.id === assessment.document.id)) continue;
+    selected.push(assessment);
+    if (selected.length >= targetCount) break;
+  }
+  const candidates = selected.slice(0, targetCount).map((assessment, index) => ({
+    rank: index + 1,
+    creatorName: assessment.document.creatorName,
+    evidenceId: assessment.document.id,
+    sourceUrl: assessment.document.url,
+    visibleFit: visibleFitLabel(assessment.score),
+    rateStatus: "Direct quote required"
+  }));
+  const budgetLabel = trimText(session.input.budget, 120) || "Not yet confirmed";
+  const band = parseBudgetBand(budgetLabel);
+  return {
+    title: `Budget guardrail for ${candidates.length} creator${candidates.length === 1 ? "" : "s"}`,
+    budgetLabel,
+    plannedCreatorCount: candidates.length,
+    equalSplitLabel: equalSplitBudgetLabel(band, candidates.length),
+    creatorSpendStatus: "Creator compensation has not yet been separated from the total campaign budget.",
+    candidates,
+    citations: selected.slice(0, targetCount).map((assessment) => citationShape(assessment.document)),
+    excludedCosts: ["Usage rights and exclusivity", "Product, shipping, and production", "Revisions, contingency, taxes, and fees"],
+    disclaimer: "This is an editable allocation guardrail based on the customer-entered budget, not a creator rate estimate. Bright Data public evidence does not verify quotes, availability, rights, or final costs."
+  };
+}
+
+function sourceOnlyBudgetAnswer(session, question) {
+  const plan = sourceBackedBudgetPlan(session, question, []);
+  if (!plan) return extractiveAnswer(session, question, [], "No source-backed creator candidates were available for budget planning.");
+  const candidateList = plan.candidates.map((candidate) => `${candidate.creatorName} [${candidate.evidenceId}]`).join(", ");
+  return {
+    answer: [
+      `Your stated campaign budget is ${plan.budgetLabel}. For ${plan.plannedCreatorCount} current candidate${plan.plannedCreatorCount === 1 ? "" : "s"}, ${plan.equalSplitLabel}`,
+      "",
+      `The current candidates are ${candidateList}. Their public records support visible-fit comparison, but they do not establish creator rates or availability.`,
+      "",
+      "Treat this as a gross planning boundary. First reserve the amounts needed for rights, product or shipping, production, revisions, contingency, taxes, and fees; then request direct creator quotes before deciding affordability."
+    ].join("\n"),
+    citations: plan.citations,
+    suggestions: ["Draft outreach asking for a quote", "Compare the top two creators", "What terms should I verify before an offer?"],
+    toolsUsed: [{ name: "estimate_budget_band", label: `Calculated a non-rate planning boundary for ${plan.plannedCreatorCount} source-backed candidates` }],
+    providerUsed: false,
+    model: "z-ai/glm-5.2",
+    note: "Used the customer-entered campaign budget and current Bright Data creator records without estimating private creator rates."
   };
 }
 
@@ -1636,6 +1766,9 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
       return completeGroundedAgentTurn(session, userMessage, campaignAgentOutreachResult(resolution.document, draft));
     }
     return completeGroundedAgentTurn(session, userMessage, outreachClarification(session, resolution.candidates));
+  }
+  if (budgetPlanningIntent(userQuestion)) {
+    return completeGroundedAgentTurn(session, userMessage, sourceOnlyBudgetAnswer(session, userQuestion));
   }
   const baselineDocuments = retrieveDocuments(session, userQuestion, DEFAULT_RETRIEVAL_LIMIT);
   if (!baselineDocuments.length) {

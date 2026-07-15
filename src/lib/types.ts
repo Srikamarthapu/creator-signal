@@ -185,6 +185,24 @@ export type CampaignAgentCreatorComparison = {
   disclaimer: string;
 };
 
+export type CampaignAgentBudgetPlan = {
+  title: string;
+  budgetLabel: string;
+  plannedCreatorCount: number;
+  equalSplitLabel: string;
+  creatorSpendStatus: string;
+  candidates: Array<{
+    rank: number;
+    creatorName: string;
+    evidenceId: string;
+    sourceUrl: string;
+    visibleFit: "Strong" | "Moderate" | "Exploratory";
+    rateStatus: "Direct quote required";
+  }>;
+  excludedCosts: string[];
+  disclaimer: string;
+};
+
 export type CampaignAgentMessage = {
   id: string;
   role: CampaignAgentRole;
@@ -193,6 +211,7 @@ export type CampaignAgentMessage = {
   actions?: CampaignAgentAction[];
   outreachDraft?: CampaignAgentOutreachDraft;
   creatorComparison?: CampaignAgentCreatorComparison;
+  budgetPlan?: CampaignAgentBudgetPlan;
   toolsUsed?: CampaignAgentToolTrace[];
   providerUsed?: boolean;
   model?: string;
@@ -269,6 +288,7 @@ export type CampaignAgentResponse = {
   actions: CampaignAgentAction[];
   outreachDraft?: CampaignAgentOutreachDraft;
   creatorComparison?: CampaignAgentCreatorComparison;
+  budgetPlan?: CampaignAgentBudgetPlan;
   suggestions: string[];
   toolsUsed: CampaignAgentToolTrace[];
   providerUsed: boolean;

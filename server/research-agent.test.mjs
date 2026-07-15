@@ -392,6 +392,68 @@ test("GLM tool calls are executed and final citations are validated", async () =
   assert.equal(requestBodies[1].response_format.type, "json_object");
 });
 
+test("GLM comparison rows are restricted to the answer's validated creator citations", async () => {
+  const creators = [influencer, {
+    ...influencer,
+    displayName: "Work Tech",
+    handle: "worktech",
+    sourceUrl: "https://www.youtube.com/watch?v=work-tech-glm",
+    sourceTitle: "Wireless mouse review for remote work"
+  }, {
+    ...influencer,
+    displayName: "Game Desk",
+    handle: "gamedesk",
+    sourceUrl: "https://www.youtube.com/watch?v=game-desk-glm",
+    sourceTitle: "Gaming mouse desk setup"
+  }];
+  const session = upsertResearchSession({
+    id: "f9a30be8-5401-405a-9e96-8467a38a031f",
+    input,
+    influencerSources: [],
+    influencers: creators
+  });
+  const responses = [{
+    choices: [{
+      message: {
+        role: "assistant",
+        content: "",
+        tool_calls: [{
+          id: "compare-call",
+          type: "function",
+          function: { name: "compare_creators", arguments: JSON.stringify({ creators: ["Work Tech", "Game Desk"] }) }
+        }]
+      }
+    }],
+    model: "z-ai/glm-5.2"
+  }, {
+    choices: [{
+      message: {
+        role: "assistant",
+        content: JSON.stringify({
+          answer: "Work Tech and Game Desk are the two records to compare. [E2][E3]",
+          citationIds: ["E2", "E3"],
+          suggestions: []
+        })
+      }
+    }],
+    model: "z-ai/glm-5.2"
+  }];
+  let requestIndex = 0;
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Compare the top two creator results side by side." }],
+    nvidia: { apiKey: "test", baseUrl: "https://example.test/v1" },
+    fetchImpl: async () => new Response(JSON.stringify(responses[requestIndex++]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    })
+  });
+
+  assert.deepEqual(result.citations.map((citation) => citation.id), ["E2", "E3"]);
+  assert.deepEqual(result.creatorComparison.rows.map((row) => row.evidenceId), ["E2", "E3"]);
+  assert.deepEqual(result.creatorComparison.rows.map((row) => row.sourceUrl), creators.slice(1).map((creator) => creator.sourceUrl));
+});
+
 test("source-only outreach stays tied to one saved creator record", async () => {
   const session = createSession();
   const result = await draftGroundedOutreach({
@@ -453,6 +515,43 @@ test("campaign chat asks the user to select one creator before drafting ambiguou
   assert.match(result.answer, /Which current creator/i);
   assert.equal(result.citations.length, 2);
   assert.ok(result.suggestions.every((suggestion) => suggestion.startsWith("Draft outreach for")));
+});
+
+test("campaign chat builds a structured comparison from current creator evidence only", async () => {
+  const comparisonCreators = [influencer, {
+    ...influencer,
+    displayName: "Work Tech",
+    handle: "worktech",
+    sourceUrl: "https://www.youtube.com/watch?v=work-tech-compare",
+    sourceTitle: "Wireless mouse review for remote work",
+    sourceDescription: "A public creator review of wireless mice for remote professionals."
+  }, {
+    ...influencer,
+    displayName: "Game Desk",
+    handle: "gamedesk",
+    sourceUrl: "https://www.youtube.com/watch?v=game-desk-compare",
+    sourceTitle: "Gaming mouse desk setup",
+    sourceDescription: "A public gaming desk setup result."
+  }];
+  const session = upsertResearchSession({
+    id: "83cff2c5-371f-4795-a01a-47533706f12b",
+    input,
+    influencerSources: [],
+    influencers: comparisonCreators
+  });
+  const result = await runGroundedCampaignAgent({
+    sessionId: session.id,
+    messages: [{ role: "user", content: "Compare the top two creator results side by side." }],
+    nvidia: {}
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.creatorComparison.rows.length, 2);
+  assert.deepEqual(result.creatorComparison.rows.map((row) => row.rank), [1, 2]);
+  assert.ok(result.creatorComparison.rows.every((row) => comparisonCreators.some((creator) => creator.sourceUrl === row.sourceUrl)));
+  assert.ok(result.creatorComparison.rows.every((row) => row.unverified.some((gap) => /rates/i.test(gap))));
+  assert.equal(result.citations.length, 2);
+  assert.deepEqual(result.actions, []);
 });
 
 test("GLM outreach requires the selected creator citation", async () => {

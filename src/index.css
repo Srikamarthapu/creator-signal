@@ -686,6 +686,76 @@
     @apply mt-4 overflow-hidden rounded-lg border border-line bg-white;
   }
 
+  .copilot-comparison {
+    @apply mt-4 overflow-hidden rounded-lg border border-line bg-white;
+  }
+
+  .copilot-comparison-heading {
+    @apply border-b border-line bg-mist px-3 py-3;
+  }
+
+  .copilot-comparison-heading strong,
+  .copilot-comparison-heading small {
+    @apply block;
+  }
+
+  .copilot-comparison-heading strong {
+    @apply text-xs font-semibold text-ink;
+  }
+
+  .copilot-comparison-heading small {
+    @apply mt-0.5 text-[10px] text-muted;
+  }
+
+  .copilot-comparison-row {
+    @apply border-b border-line px-3 py-3 last:border-b-0;
+  }
+
+  .copilot-comparison-row-heading {
+    @apply flex items-center gap-2.5;
+  }
+
+  .copilot-comparison-rank {
+    @apply flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-signal-900 text-[10px] font-semibold text-white;
+  }
+
+  .copilot-comparison-row-heading strong,
+  .copilot-comparison-row-heading small {
+    @apply block overflow-hidden text-ellipsis;
+  }
+
+  .copilot-comparison-row-heading strong {
+    @apply text-xs font-semibold text-ink;
+  }
+
+  .copilot-comparison-row-heading small {
+    @apply mt-0.5 text-[10px] text-muted;
+  }
+
+  .copilot-comparison-row-heading a {
+    @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line text-muted transition-colors hover:border-signal-900 hover:text-signal-900;
+  }
+
+  .copilot-comparison-row > p {
+    @apply mt-2 text-xs leading-5 text-ink;
+  }
+
+  .copilot-comparison-signals {
+    @apply mt-2 flex flex-wrap gap-1.5;
+  }
+
+  .copilot-comparison-signals span {
+    @apply rounded-full border border-line bg-mist px-2 py-0.5 text-[10px] font-medium text-muted;
+  }
+
+  .copilot-comparison-gaps {
+    @apply mt-2 block text-[10px] leading-4 text-muted;
+  }
+
+  .copilot-comparison-disclaimer {
+    @apply border-t border-line bg-mist px-3 py-2 text-[10px] leading-4 text-muted;
+  }
+
   .copilot-outreach-heading {
     @apply flex min-h-12 items-center justify-between gap-3 border-b border-line bg-mist px-3 py-2;
   }

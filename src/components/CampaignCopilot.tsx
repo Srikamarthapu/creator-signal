@@ -362,6 +362,7 @@ export function CampaignCopilot({
         citations: data.citations,
         actions: data.actions,
         outreachDraft: data.outreachDraft,
+        creatorComparison: data.creatorComparison,
         toolsUsed: data.toolsUsed,
         providerUsed: data.providerUsed,
         model: data.model,
@@ -596,6 +597,38 @@ export function CampaignCopilot({
                           </a>
                         ))}
                       </div>
+                    ) : null}
+                    {message.creatorComparison ? (
+                      <section className="copilot-comparison" aria-label="Creator evidence comparison">
+                        <div className="copilot-comparison-heading">
+                          <span>
+                            <strong>{message.creatorComparison.title}</strong>
+                            <small>Saved public evidence only</small>
+                          </span>
+                        </div>
+                        <div className="copilot-comparison-rows">
+                          {message.creatorComparison.rows.map((row) => (
+                            <div className="copilot-comparison-row" key={`${row.evidenceId}-${row.sourceUrl}`}>
+                              <div className="copilot-comparison-row-heading">
+                                <span className="copilot-comparison-rank">{row.rank}</span>
+                                <span className="min-w-0 flex-1">
+                                  <strong>{row.creatorName}</strong>
+                                  <small>{row.visibleFit} visible fit · {row.evidenceStrength} evidence</small>
+                                </span>
+                                <a href={row.sourceUrl} target="_blank" rel="noreferrer" aria-label={`Open evidence for ${row.creatorName}`}>
+                                  <ExternalLink className="h-3.5 w-3.5" />
+                                </a>
+                              </div>
+                              <p>{row.reason}</p>
+                              <div className="copilot-comparison-signals">
+                                {row.signals.map((signal) => <span key={signal}>{signal}</span>)}
+                              </div>
+                              <small className="copilot-comparison-gaps">Unverified: {row.unverified.join(", ").toLowerCase()}.</small>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="copilot-comparison-disclaimer">{message.creatorComparison.disclaimer}</p>
+                      </section>
                     ) : null}
                     {message.outreachDraft ? (
                       <section className="copilot-outreach-draft" aria-label={`Outreach draft for ${message.outreachDraft.creatorName}`}>

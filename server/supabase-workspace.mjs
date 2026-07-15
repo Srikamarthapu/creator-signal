@@ -355,30 +355,68 @@ function clientAgentAction(row) {
 }
 
 function persistedMessageArtifacts(agentResult, researchRunId, allowedSourceUrls) {
+  const artifacts = [];
+  const allowed = new Set(allowedSourceUrls || []);
+  const citations = Array.isArray(agentResult?.citations) ? agentResult.citations : [];
+  const assertSourceBacked = (sourceUrl, evidenceId, label) => {
+    const sourceAllowed = researchRunId && allowed.has(sourceUrl);
+    const sourceCited = citations.some((citation) => citation?.url === sourceUrl && citation?.id === evidenceId);
+    if (!sourceAllowed || !sourceCited) throw new Error(`${label} was not backed by the active research snapshot.`);
+  };
+
   const draft = agentResult?.outreachDraft;
-  if (!draft) return [];
-  const sourceUrl = String(draft.sourceUrl || "").trim();
-  const evidenceId = String(draft.evidenceId || "").trim();
-  const sourceAllowed = researchRunId && new Set(allowedSourceUrls || []).has(sourceUrl);
-  const sourceCited = Array.isArray(agentResult.citations) && agentResult.citations.some((citation) => (
-    citation?.url === sourceUrl && citation?.id === evidenceId
-  ));
-  if (!sourceAllowed || !sourceCited || draft.status !== "draft") {
-    throw new Error("Agent outreach draft was not backed by the active research snapshot.");
+  if (draft) {
+    const sourceUrl = String(draft.sourceUrl || "").trim();
+    const evidenceId = String(draft.evidenceId || "").trim();
+    assertSourceBacked(sourceUrl, evidenceId, "Agent outreach draft");
+    if (draft.status !== "draft") throw new Error("Agent outreach draft had an invalid status.");
+    const subject = String(draft.subject || "").trim().slice(0, 160);
+    const body = String(draft.body || "").trim().slice(0, 6000);
+    if (!subject || !body) throw new Error("Agent outreach draft was incomplete.");
+    artifacts.push({
+      type: "outreach_draft",
+      version: 1,
+      creator_name: String(draft.creatorName || "Creator").trim().slice(0, 160),
+      subject,
+      body,
+      source_url: sourceUrl,
+      evidence_id: evidenceId,
+      status: "draft"
+    });
   }
-  const subject = String(draft.subject || "").trim().slice(0, 160);
-  const body = String(draft.body || "").trim().slice(0, 6000);
-  if (!subject || !body) throw new Error("Agent outreach draft was incomplete.");
-  return [{
-    type: "outreach_draft",
-    version: 1,
-    creator_name: String(draft.creatorName || "Creator").trim().slice(0, 160),
-    subject,
-    body,
-    source_url: sourceUrl,
-    evidence_id: evidenceId,
-    status: "draft"
-  }];
+
+  const comparison = agentResult?.creatorComparison;
+  if (comparison) {
+    const rows = Array.isArray(comparison.rows) ? comparison.rows.slice(0, 4) : [];
+    if (!rows.length) throw new Error("Agent creator comparison was empty.");
+    const persistedRows = rows.map((row, index) => {
+      const sourceUrl = String(row?.sourceUrl || "").trim();
+      const evidenceId = String(row?.evidenceId || "").trim();
+      assertSourceBacked(sourceUrl, evidenceId, "Agent creator comparison");
+      const visibleFit = ["Strong", "Moderate", "Exploratory"].includes(row?.visibleFit) ? row.visibleFit : "Exploratory";
+      return {
+        rank: index + 1,
+        creator_name: String(row?.creatorName || "Creator").trim().slice(0, 160),
+        evidence_id: evidenceId,
+        source_url: sourceUrl,
+        source_title: String(row?.sourceTitle || "Public creator evidence").trim().slice(0, 500),
+        visible_fit: visibleFit,
+        evidence_strength: String(row?.evidenceStrength || "Low").trim().slice(0, 40),
+        signals: [...new Set((Array.isArray(row?.signals) ? row.signals : []).map((item) => String(item).trim().slice(0, 160)).filter(Boolean))].slice(0, 4),
+        reason: String(row?.reason || "Visible public evidence overlaps with the campaign brief.").trim().slice(0, 900),
+        unverified: [...new Set((Array.isArray(row?.unverified) ? row.unverified : []).map((item) => String(item).trim().slice(0, 160)).filter(Boolean))].slice(0, 4)
+      };
+    });
+    artifacts.push({
+      type: "creator_comparison",
+      version: 1,
+      title: String(comparison.title || "Creator evidence comparison").trim().slice(0, 200),
+      rows: persistedRows,
+      disclaimer: String(comparison.disclaimer || "This comparison is limited to saved public evidence.").trim().slice(0, 700)
+    });
+  }
+
+  return artifacts;
 }
 
 function clientOutreachDraft(artifacts) {
@@ -393,6 +431,29 @@ function clientOutreachDraft(artifacts) {
     sourceUrl: artifact.source_url || "",
     evidenceId: artifact.evidence_id || "",
     status: "draft"
+  };
+}
+
+function clientCreatorComparison(artifacts) {
+  const artifact = Array.isArray(artifacts)
+    ? artifacts.find((candidate) => candidate?.type === "creator_comparison" && Array.isArray(candidate?.rows))
+    : null;
+  if (!artifact) return undefined;
+  return {
+    title: artifact.title || "Creator evidence comparison",
+    rows: artifact.rows.slice(0, 4).map((row, index) => ({
+      rank: Number(row?.rank || index + 1),
+      creatorName: row?.creator_name || "Creator",
+      evidenceId: row?.evidence_id || "",
+      sourceUrl: row?.source_url || "",
+      sourceTitle: row?.source_title || "Public creator evidence",
+      visibleFit: row?.visible_fit || "Exploratory",
+      evidenceStrength: row?.evidence_strength || "Low",
+      signals: Array.isArray(row?.signals) ? row.signals : [],
+      reason: row?.reason || "Visible public evidence overlaps with the campaign brief.",
+      unverified: Array.isArray(row?.unverified) ? row.unverified : []
+    })),
+    disclaimer: artifact.disclaimer || "This comparison is limited to saved public evidence."
   };
 }
 
@@ -892,6 +953,7 @@ async function loadConversationTranscript({ organizationId, conversationId }) {
       content: message.content,
       citations: Array.isArray(message.citations) ? message.citations : [],
       outreachDraft: clientOutreachDraft(message.artifacts),
+      creatorComparison: clientCreatorComparison(message.artifacts),
       actions: (actionRowsByAssistantMessage.get(message.id) || [])
         .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id))
         .map(clientAgentAction),

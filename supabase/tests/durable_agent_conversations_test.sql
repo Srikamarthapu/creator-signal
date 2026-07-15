@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(17);
+SELECT plan(18);
 
 insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data)
 values
@@ -111,7 +111,7 @@ values
   );
 
 update public.conversation_messages
-set artifacts = '[{"type":"outreach_draft","version":1,"creator_name":"Workspace Gear","subject":"Workspace collaboration","body":"A source-backed draft.","source_url":"https://example.test/workspace-gear","evidence_id":"E1","status":"draft"}]'::jsonb
+set artifacts = '[{"type":"outreach_draft","version":1,"creator_name":"Workspace Gear","subject":"Workspace collaboration","body":"A source-backed draft.","source_url":"https://example.test/workspace-gear","evidence_id":"E1","status":"draft"},{"type":"creator_comparison","version":1,"title":"Workspace creator comparison","rows":[{"rank":1,"creator_name":"Workspace Gear","evidence_id":"E1","source_url":"https://example.test/workspace-gear","source_title":"Workspace gear review","visible_fit":"Strong","evidence_strength":"Medium","signals":["Visible review format"],"reason":"The public result matches the brief.","unverified":["Rates and availability"]}],"disclaimer":"Saved public evidence only."}]'::jsonb
 where id = 'a4000000-0000-4000-8000-000000000002';
 
 select throws_ok(
@@ -165,6 +165,11 @@ select is(
   (select artifacts -> 0 ->> 'source_url' from public.conversation_messages where id = 'a4000000-0000-4000-8000-000000000002'),
   'https://example.test/workspace-gear',
   'restored outreach keeps its canonical source URL'
+);
+select is(
+  (select artifacts -> 1 ->> 'type' from public.conversation_messages where id = 'a4000000-0000-4000-8000-000000000002'),
+  'creator_comparison',
+  'workspace members can restore a structured creator comparison from agent memory'
 );
 select is((select count(*)::integer from public.agent_runs), 1, 'workspace A sees only its model runs');
 select is((select count(*)::integer from public.agent_tool_calls), 1, 'workspace A sees only its tool traces');

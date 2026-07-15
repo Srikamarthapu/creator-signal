@@ -485,8 +485,9 @@ function creatorFitReason(assessment) {
   return `${reason}.`;
 }
 
-function sourceOnlyRankingAnswer(session, reason) {
-  const ranked = rankCreatorDocuments(session).slice(0, 3);
+function sourceOnlyRankingAnswer(session, reason, question = "") {
+  const limit = creatorComparisonIntent(question) ? requestedComparisonLimit(question) : 3;
+  const ranked = rankCreatorDocuments(session).slice(0, limit);
   const answer = [
     "Based only on the public evidence Bright Data returned, the strongest visible matches are:",
     "",
@@ -577,11 +578,95 @@ function sourceBackedActionProposals(session, userMessage, citations) {
 }
 
 function completeGroundedAgentTurn(session, userMessage, result) {
+  const creatorComparison = sourceBackedCreatorComparison(session, userMessage?.content, result.citations);
+  const citations = creatorComparison
+    ? [...new Map([...(result.citations || []), ...creatorComparison.citations].map((citation) => [citation.url, citation])).values()]
+    : result.citations;
   return {
     status: "ok",
     session: publicSession(session),
     ...result,
-    actions: sourceBackedActionProposals(session, userMessage, result.citations)
+    citations,
+    ...(creatorComparison ? { creatorComparison: {
+      title: creatorComparison.title,
+      rows: creatorComparison.rows,
+      disclaimer: creatorComparison.disclaimer
+    } } : {}),
+    actions: sourceBackedActionProposals(session, userMessage, citations)
+  };
+}
+
+function creatorComparisonIntent(question) {
+  return /\b(?:compare|comparison|versus|vs\.?|tradeoffs?|side[ -]by[ -]side)\b/i.test(trimText(question, 2400));
+}
+
+function requestedComparisonLimit(question) {
+  const normalized = trimText(question, 2400).toLowerCase();
+  if (/\b(?:four|4)\b.{0,24}\b(?:creators?|influencers?|candidates?|results?)\b|\b(?:top|compare)\b.{0,16}\b(?:four|4)\b/.test(normalized)) return 4;
+  if (/\b(?:three|3)\b.{0,24}\b(?:creators?|influencers?|candidates?|results?)\b|\b(?:top|compare)\b.{0,16}\b(?:three|3)\b/.test(normalized)) return 3;
+  if (/\b(?:two|2|pair)\b.{0,24}\b(?:creators?|influencers?|candidates?|results?)\b|\b(?:top|compare)\b.{0,16}\b(?:two|2|pair)\b/.test(normalized)) return 2;
+  return 3;
+}
+
+function questionMentionsCreator(document, normalizedQuestion) {
+  const creatorName = trimText(document.creatorName, 140).toLowerCase();
+  const handle = trimText(document.handle, 140).replace(/^@/, "").toLowerCase();
+  return (creatorName.length > 2 && normalizedQuestion.includes(creatorName))
+    || (handle.length > 2 && new RegExp(`(?:^|[^a-z0-9_])@?${escapeRegExp(handle)}(?:$|[^a-z0-9_])`, "i").test(normalizedQuestion));
+}
+
+function visibleFitLabel(score) {
+  if (score >= 45) return "Strong";
+  if (score >= 25) return "Moderate";
+  return "Exploratory";
+}
+
+function sourceBackedCreatorComparison(session, question, responseCitations = []) {
+  if (!creatorComparisonIntent(question)) return null;
+  const normalized = trimText(question, 2400).toLowerCase();
+  const ranked = rankCreatorDocuments(session);
+  if (!ranked.length) return null;
+  const named = ranked.filter((assessment) => questionMentionsCreator(assessment.document, normalized));
+  const targetCount = named.length >= 2 ? Math.min(4, named.length) : named.length === 1 ? 2 : requestedComparisonLimit(question);
+  const assessmentById = new Map(ranked.map((assessment) => [assessment.document.id, assessment]));
+  const assessmentByUrl = new Map(ranked.map((assessment) => [safePublicUrl(assessment.document.url), assessment]));
+  const cited = [...new Map((Array.isArray(responseCitations) ? responseCitations : []).map((citation) => {
+    const assessment = assessmentById.get(trimText(citation?.id, 20)) || assessmentByUrl.get(safePublicUrl(citation?.url));
+    return assessment ? [assessment.document.id, assessment] : null;
+  }).filter(Boolean)).values()];
+  const selected = named.length >= 2 ? [...named] : [...named, ...cited.filter((assessment) => (
+    !named.some((candidate) => candidate.document.id === assessment.document.id)
+  ))];
+  for (const assessment of ranked) {
+    if (selected.some((candidate) => candidate.document.id === assessment.document.id)) continue;
+    selected.push(assessment);
+    if (selected.length >= targetCount) break;
+  }
+  const rows = selected.slice(0, targetCount).map((assessment, index) => {
+    const signals = [
+      ...assessment.productTitleMatches.slice(0, 3).map((term) => `Title matches ${term}`),
+      ...assessment.formatSignals.slice(0, 2).map((format) => `Visible ${format} format`),
+      ...assessment.contextTitleMatches.slice(0, 2).map((term) => `Brief overlap: ${term}`)
+    ];
+    if (!signals.length) signals.push(`Public ${assessment.document.sourceType || "search"} evidence`);
+    return {
+      rank: index + 1,
+      creatorName: assessment.document.creatorName,
+      evidenceId: assessment.document.id,
+      sourceUrl: assessment.document.url,
+      sourceTitle: assessment.document.title,
+      visibleFit: visibleFitLabel(assessment.score),
+      evidenceStrength: trimText(assessment.document.confidence, 40) || "Low",
+      signals: [...new Set(signals)].slice(0, 4),
+      reason: creatorFitReason(assessment),
+      unverified: ["Audience and engagement", "Rates and availability", "Rights and brand safety"]
+    };
+  });
+  return {
+    title: `Evidence comparison for ${session.input.product}`,
+    rows,
+    citations: selected.slice(0, targetCount).map((assessment) => citationShape(assessment.document)),
+    disclaimer: "Visible fit is a relative comparison of this saved public evidence, not verified creator performance. Commercial terms and private analytics remain unverified."
   };
 }
 
@@ -599,12 +684,7 @@ function resolveOutreachDocument(session, question) {
   const normalized = trimText(question, 2400).toLowerCase();
   const rankedDocuments = rankCreatorDocuments(session).map((assessment) => assessment.document);
   const creatorDocuments = buildResearchDocuments(session).filter((document) => document.kind === "creator");
-  const namedMatches = creatorDocuments.filter((document) => {
-    const creatorName = trimText(document.creatorName, 140).toLowerCase();
-    const handle = trimText(document.handle, 140).replace(/^@/, "").toLowerCase();
-    return (creatorName.length > 2 && normalized.includes(creatorName))
-      || (handle.length > 2 && new RegExp(`(?:^|[^a-z0-9_])@?${escapeRegExp(handle)}(?:$|[^a-z0-9_])`, "i").test(normalized));
-  });
+  const namedMatches = creatorDocuments.filter((document) => questionMentionsCreator(document, normalized));
   const uniqueNamedMatches = [...new Map(namedMatches.map((document) => [document.id, document])).values()];
   if (uniqueNamedMatches.length === 1) return { document: uniqueNamedMatches[0], candidates: rankedDocuments };
   if (uniqueNamedMatches.length > 1) return { document: null, candidates: uniqueNamedMatches };
@@ -1516,7 +1596,7 @@ function extractiveAnswer(session, question, documents, reason) {
     || /\b(?:who|which)\b.{0,60}\bfit(?:s|ting)?\b/.test(normalizedQuestion);
   const asksForEvidenceGaps = /\b(?:gap|gaps|missing|unknown|unverified|verify|verification|cannot establish|not know|risk|risks)\b/.test(normalizedQuestion);
   if (asksForEvidenceGaps && rankCreatorDocuments(session).length) return sourceOnlyEvidenceGapAnswer(session, reason);
-  if (asksForRanking && rankCreatorDocuments(session).length) return sourceOnlyRankingAnswer(session, reason);
+  if (asksForRanking && rankCreatorDocuments(session).length) return sourceOnlyRankingAnswer(session, reason, question);
 
   const top = documents.slice(0, 3);
   const points = top.map((document) => `${document.creatorName ? `${document.creatorName}: ` : ""}${trimText(document.text, 260)} [${document.id}]`);

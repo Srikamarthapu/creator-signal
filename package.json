@@ -10,6 +10,7 @@
     "build": "tsc -b && vite build",
     "lint": "tsc -b --pretty false",
     "test": "node --test server/*.test.mjs",
+    "test:agent-evals": "node --test server/research-agent.evals.test.mjs",
     "test:db": "supabase test db",
     "check": "pnpm test && pnpm build",
     "preview": "vite preview --host 127.0.0.1"

@@ -4,6 +4,7 @@ import express from "express";
 import crypto from "node:crypto";
 import { Agent, run } from "@openai/agents";
 import { z } from "zod";
+import { evaluationMakesUnsupportedInference, sourceEvaluationCeiling } from "./evaluation-guard.mjs";
 import {
   ResearchSessionConflictError,
   draftGroundedCampaignBrief,
@@ -1363,7 +1364,7 @@ function localInfluencerEvaluation(input, influencer, index = 0) {
   const sourceBonus = influencer.sourceType === "profile" ? 10 : influencer.sourceType === "post" ? 8 : influencer.sourceType === "searchResult" ? 3 : 0;
   const confidenceBonus = influencer.confidence === "High" ? 10 : influencer.confidence === "Medium" ? 5 : 0;
   const riskPenalty = realSourceRiskPenalty(influencer);
-  const score = Math.min(94, Math.max(42, 58 + relevance * 4 + sourceBonus + confidenceBonus - riskPenalty - index));
+  const score = Math.min(sourceEvaluationCeiling(influencer), Math.max(42, 58 + relevance * 4 + sourceBonus + confidenceBonus - riskPenalty - index));
   const verdict = evaluationVerdict(score);
   const product = input.product || "the product";
   return {
@@ -1420,7 +1421,7 @@ function normalizeInfluencerEvaluationOutput(value, input, influencers) {
       const candidate =
         byKey.get(`${fallbackItem.sourceUrl}::${fallbackItem.displayName}`.toLowerCase()) ||
         byUrl.get(fallbackItem.sourceUrl.toLowerCase());
-      if (!candidate) return fallbackItem;
+      if (!candidate || evaluationMakesUnsupportedInference(candidate)) return fallbackItem;
       const boundedScore = Math.min(100, Math.max(0, candidate.aiScore || fallbackItem.aiScore));
       return {
         displayName: fallbackItem.displayName,
@@ -1464,7 +1465,8 @@ async function runInfluencerEvaluationChunk(input, influencers, provider, batchI
       "Reward direct visible product/category relevance.",
       "Reward direct profile/post evidence over articles or generic search results.",
       "Penalize marketplace, affiliate marketing education, seller tutorials, or non-creator pages.",
-      "Do not infer private analytics, follower counts, rates, emails, or conversion data."
+      "Do not infer private analytics, follower counts, rates, emails, or conversion data.",
+      "A visible view count may be repeated as a source fact, but it is never evidence of engagement, reach, fit, sales, or conversions."
     ]
   };
   let usedModel = configuredAIModel();
@@ -1477,6 +1479,7 @@ async function runInfluencerEvaluationChunk(input, influencers, provider, batchI
             [
               "Schema: {\"evaluations\":[{\"displayName\":\"string\",\"sourceUrl\":\"string\",\"aiScore\":0,\"verdict\":\"Strong fit|Good fit|Check fit|Weak fit\",\"summary\":\"string\",\"strengths\":[\"string\"],\"risks\":[\"string\"],\"recommendedUse\":\"string\",\"confidence\":\"Low|Medium|High\"}],\"note\":\"string\"}",
               "Evaluate every supplied influencer for product fit using only the supplied public source fields. Preserve displayName and sourceUrl exactly. Keep summary, strengths, risks, and recommendedUse short.",
+              "Never infer engagement, reach, sales, conversions, or campaign performance from a visible view count. Treat those outcomes as unverified.",
               `Product intent terms: ${productIntentTerms(input.product).join(", ")}.`
             ].join("\n"),
             {
@@ -1501,10 +1504,7 @@ async function runInfluencerEvaluationChunk(input, influencers, provider, batchI
   }
 
   return {
-    evaluations: parsed.data.evaluations.map((evaluation) => ({
-      ...evaluation,
-      scoringMethod: "ai"
-    })),
+    evaluations: parsed.data.evaluations,
     model: usedModel,
     note: parsed.data.note
   };

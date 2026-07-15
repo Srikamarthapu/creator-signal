@@ -150,6 +150,8 @@ Make the AI strategist the fastest and clearest way to plan a campaign and activ
 - model/provider comparison based on activation quality, latency, and cost;
 - release block when fallback is mislabeled as AI.
 
+Current implementation checkpoint: the automated release suite now covers five product categories, expected ranking order, reordered-input stability, duplicate identities, citation validity, unsupported creator claims, prompt-injection source text, and source-only fallback labeling. Model/provider activation-quality, latency, and cost comparison remains a production-readiness requirement.
+
 ### Exit gate
 
 - median brief-to-credible-shortlist time is materially lower than each pilot customer's current process;

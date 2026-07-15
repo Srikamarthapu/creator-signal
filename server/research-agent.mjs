@@ -76,6 +76,18 @@ function trimText(value, max = 800) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function sanitizeSourceText(value, max = 800) {
+  const instructionLikePatterns = [
+    /(?:^|[.!?]\s+)(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|system|developer|assistant)?\s*(?:instructions?|messages?|prompts?)?[^.!?]*/gi,
+    /(?:^|[.!?]\s+)(?:reveal|print|show|expose|return|send)\b[^.!?]{0,140}\b(?:api\s*keys?|secrets?|access\s*tokens?|system\s*prompts?|developer\s*messages?)\b[^.!?]*/gi,
+    /(?:^|[.!?]\s+)\b(?:system|developer)\s+(?:prompt|message|instructions?)\s*[:=-][^.!?]*/gi,
+    /\b(?:begin|end)\s+(?:system|developer|prompt)\b[^.!?]*/gi
+  ];
+  let sanitized = String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ");
+  for (const pattern of instructionLikePatterns) sanitized = sanitized.replace(pattern, " ");
+  return trimText(sanitized, max);
+}
+
 function deterministicUuid(value) {
   const bytes = Buffer.from(crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 32), "hex");
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -97,7 +109,7 @@ function safeProviderFallbackNote(reason, fallback) {
   if (/not configured|missing (?:an? )?(?:api )?key/.test(normalized)) {
     return `GLM 5.2 is not configured. ${fallback}`;
   }
-  if (/without verifiable evidence citations|did not return a valid structured brief|did not return a valid|returned an empty|did not provide a usable|did not call a supported/.test(normalized)) {
+  if (/without verifiable evidence citations|failed grounding validation|did not return a valid structured brief|did not return a valid|returned an empty|did not provide a usable|did not call a supported/.test(normalized)) {
     return `${detail} ${fallback}`;
   }
   if (/no current bright data evidence|outside this research snapshot|no customer request/.test(normalized)) return detail;
@@ -116,9 +128,9 @@ function safePublicUrl(value) {
 function normalizeSource(source, index = 0) {
   const link = safePublicUrl(source?.link || source?.url);
   return {
-    title: trimText(source?.title || source?.source || `Public result ${index + 1}`, 200),
+    title: sanitizeSourceText(source?.title || source?.source, 200) || `Public result ${index + 1}`,
     source: trimText(source?.source || "Public web result", 120),
-    description: trimText(source?.description || source?.snippet || source?.text, 700),
+    description: sanitizeSourceText(source?.description || source?.snippet || source?.text, 700),
     link,
     rank: Number.isFinite(Number(source?.rank)) ? Number(source.rank) : index + 1
   };
@@ -128,17 +140,17 @@ function normalizeInfluencer(influencer) {
   const sourceUrl = safePublicUrl(influencer?.sourceUrl);
   if (!sourceUrl) return null;
   return {
-    displayName: trimText(influencer?.displayName || "Public creator result", 140),
+    displayName: sanitizeSourceText(influencer?.displayName, 140) || "Public creator result",
     handle: trimText(influencer?.handle, 100).replace(/^@/, "") || undefined,
     platform: trimText(influencer?.platform || "Public web", 60),
     profileUrl: safePublicUrl(influencer?.profileUrl) || undefined,
     sourceUrl,
-    sourceTitle: trimText(influencer?.sourceTitle || "Public creator source", 220),
-    sourceDescription: trimText(influencer?.sourceDescription, 800),
-    niche: trimText(influencer?.niche || "Creator discovery result", 180),
-    matchReason: trimText(influencer?.matchReason || "Matched by public source evidence.", 700),
+    sourceTitle: sanitizeSourceText(influencer?.sourceTitle, 220) || "Public creator source",
+    sourceDescription: sanitizeSourceText(influencer?.sourceDescription, 800),
+    niche: sanitizeSourceText(influencer?.niche, 180) || "Creator discovery result",
+    matchReason: sanitizeSourceText(influencer?.matchReason, 700) || "Matched by public source evidence.",
     evidence: Array.isArray(influencer?.evidence)
-      ? influencer.evidence.map((item) => trimText(item, 220)).filter(Boolean).slice(0, 4)
+      ? influencer.evidence.map((item) => sanitizeSourceText(item, 220)).filter(Boolean).slice(0, 4)
       : [],
     confidence: ["Low", "Medium", "High"].includes(influencer?.confidence) ? influencer.confidence : "Low",
     sourceType: ["profile", "post", "article", "searchResult"].includes(influencer?.sourceType)
@@ -146,6 +158,65 @@ function normalizeInfluencer(influencer) {
       : "searchResult",
     matchScore: Math.max(0, Math.min(100, Number(influencer?.matchScore || 0)))
   };
+}
+
+function normalizedIdentityUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    parsed.hash = "";
+    parsed.search = "";
+    return `${parsed.hostname.toLowerCase()}${parsed.pathname.replace(/\/$/, "").toLowerCase()}`;
+  } catch {
+    return "";
+  }
+}
+
+function influencerIdentityKeys(influencer) {
+  const platform = trimText(influencer.platform, 60).toLowerCase();
+  return [...new Set([
+    influencer.sourceUrl ? `source:${safePublicUrl(influencer.sourceUrl).toLowerCase()}` : "",
+    influencer.handle ? `handle:${platform}:${influencer.handle.toLowerCase()}` : "",
+    influencer.profileUrl ? `profile:${platform}:${normalizedIdentityUrl(influencer.profileUrl)}` : ""
+  ].filter(Boolean))];
+}
+
+function influencerPreference(influencer) {
+  const confidence = { High: 3, Medium: 2, Low: 1 }[influencer.confidence] || 0;
+  const sourceType = { post: 4, article: 3, profile: 2, searchResult: 1 }[influencer.sourceType] || 0;
+  return Number(influencer.matchScore || 0) * 1000
+    + confidence * 100
+    + sourceType * 10
+    + Math.min(9, influencer.evidence.length);
+}
+
+function preferredInfluencer(left, right) {
+  const scoreDifference = influencerPreference(right) - influencerPreference(left);
+  if (scoreDifference !== 0) return scoreDifference > 0 ? right : left;
+  const leftKey = `${left.sourceUrl}\n${left.sourceTitle}\n${left.displayName}`.toLowerCase();
+  const rightKey = `${right.sourceUrl}\n${right.sourceTitle}\n${right.displayName}`.toLowerCase();
+  return rightKey.localeCompare(leftKey) < 0 ? right : left;
+}
+
+function dedupeInfluencers(influencers) {
+  const deduped = [];
+  const identityKeys = [];
+  for (const influencer of influencers) {
+    const keys = influencerIdentityKeys(influencer);
+    const existingIndex = identityKeys.findIndex((existingKeys) => existingKeys.some((key) => keys.includes(key)));
+    if (existingIndex < 0) {
+      deduped.push(influencer);
+      identityKeys.push(keys);
+      continue;
+    }
+    const existing = deduped[existingIndex];
+    const preferred = preferredInfluencer(existing, influencer);
+    deduped[existingIndex] = {
+      ...preferred,
+      evidence: [...new Set([...existing.evidence, ...influencer.evidence])].sort((left, right) => left.localeCompare(right)).slice(0, 4)
+    };
+    identityKeys[existingIndex] = [...new Set([...identityKeys[existingIndex], ...keys])];
+  }
+  return deduped;
 }
 
 function inputFingerprint(input) {
@@ -229,7 +300,7 @@ export function upsertResearchSession({ id, ownerKey = "anonymous", input, produ
     session.influencerSources = dedupeSources(influencerSources.map(normalizeSource)).slice(0, 16);
   }
   if (Array.isArray(influencers)) {
-    session.influencers = influencers.map(normalizeInfluencer).filter(Boolean).slice(0, 12);
+    session.influencers = dedupeInfluencers(influencers.map(normalizeInfluencer).filter(Boolean)).slice(0, 12);
   }
 
   session.updatedAtMs = now;
@@ -454,7 +525,9 @@ function rankCreatorDocuments(session) {
   return buildResearchDocuments(session)
     .filter((document) => document.kind === "creator")
     .map((document) => creatorFitAssessment(session, document))
-    .sort((a, b) => b.score - a.score || a.document.order - b.document.order);
+    .sort((a, b) => b.score - a.score
+      || String(a.document.creatorName || "").localeCompare(String(b.document.creatorName || ""))
+      || String(a.document.url || "").localeCompare(String(b.document.url || "")));
 }
 
 function readableTerms(terms) {
@@ -1619,6 +1692,47 @@ function parseFinalAgentOutput(content) {
   }
 }
 
+function validateGroundedAnswer(answer, documents) {
+  const knownDocumentIds = new Set(documents.map((document) => document.id));
+  const citationIds = [...new Set([...String(answer || "").matchAll(/\[(E\d+)\]/g)].map((match) => match[1]))];
+  if (!citationIds.length) return { valid: false, reason: "the answer did not contain an inline evidence citation", citationIds: [] };
+  if (citationIds.some((id) => !knownDocumentIds.has(id))) {
+    return { valid: false, reason: "the answer referenced evidence outside the retrieved tool results", citationIds: [] };
+  }
+
+  const normalized = String(answer || "");
+  const unsafePatterns = [
+    [/(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|system|developer|assistant)?\s*(?:instructions?|messages?|prompts?)/i, "repeated an instruction from untrusted source text"],
+    [/(?:reveal|print|show|expose|return|send)\b.{0,100}\b(?:api\s*keys?|secrets?|access\s*tokens?|system\s*prompts?|developer\s*messages?)/i, "attempted to expose protected instructions or credentials"],
+    [/\b(?:begin|end)\s+(?:system|developer|prompt)\b/i, "included a prompt-control marker"],
+    [/\b(?:has|have|with|reaches?|boasts?)\s+(?:about\s+|over\s+|more\s+than\s+|nearly\s+)?\d[\d,.]*\s*[km]?\s+(?:followers?|subscribers?|views?)\b/i, "asserted an unverified audience metric"],
+    [/\b(?:engagement|conversion|click-through)\s+rate\b.{0,30}\b\d+(?:\.\d+)?%/i, "asserted an unverified performance rate"],
+    [/\b(?:audience|followers?|viewers?)\b.{0,35}\b\d+(?:\.\d+)?%/i, "asserted an unverified audience demographic"],
+    [/\b(?:audience|followers?|viewers?)\s+(?:is|are|skews?|consists?|primarily|mostly)\s+(?!not\b|unknown\b|unverified\b)/i, "asserted an unverified audience demographic"],
+    [/\b(?:charges?|creator\s+rate\s+is|asks?\s+for)\s+\$\s*\d/i, "asserted an unverified creator rate"],
+    [/\b(?:email|phone|contact)\s+(?:is|:|at)\s*[\w.+-]+@/i, "asserted private contact information"],
+    [/\b(?:is|are|currently|appears?|seems?)\s+(?:available|reachable|open\s+for\s+bookings?)\b/i, "asserted unverified availability"],
+    [/\bguarantee(?:s|d)?\b.{0,60}\b(?:sales|conversions?|performance|results?|revenue|roi)\b/i, "asserted a guaranteed campaign outcome"],
+    [/\b(?:drove|generated|delivered)\s+\$?\d[\d,.]*\s*(?:sales|revenue|orders?|leads?)\b/i, "asserted an unverified campaign outcome"]
+  ];
+  for (const [pattern, reason] of unsafePatterns) {
+    if (pattern.test(normalized)) return { valid: false, reason, citationIds: [] };
+  }
+
+  const claimSegments = normalized.split(/\n+|(?<=[.!?])\s+(?!\[E\d+\])/).map((segment) => segment.trim()).filter(Boolean);
+  const creatorReferences = documents.filter((document) => document.kind === "creator").flatMap((document) => [
+    trimText(document.creatorName, 140).toLowerCase(),
+    trimText(document.handle, 100).replace(/^@/, "").toLowerCase()
+  ].filter((value) => value.length > 2));
+  for (const segment of claimSegments) {
+    const segmentText = segment.toLowerCase();
+    if (creatorReferences.some((reference) => segmentText.includes(reference)) && !/\[E\d+\]/.test(segment)) {
+      return { valid: false, reason: "a creator-specific claim was missing an inline citation", citationIds: [] };
+    }
+  }
+  return { valid: true, reason: "", citationIds };
+}
+
 function allowedCitations(documents, requestedIds) {
   const byId = new Map(documents.map((document) => [document.id, document]));
   const ids = Array.isArray(requestedIds) ? requestedIds.map(String) : [];
@@ -1962,12 +2076,15 @@ export async function runGroundedCampaignAgent({ sessionId, ownerKey = "anonymou
     usedModel = final.model;
     const output = parseFinalAgentOutput(final.message.content);
     const answer = trimText(output?.answer, 6000);
-    const citedDocuments = allowedCitations(uniqueDocuments, output?.citationIds);
-    const answerCitationIds = [...answer.matchAll(/\[(E\d+)\]/g)].map((match) => match[1]);
-    const answerCitations = allowedCitations(uniqueDocuments, answerCitationIds);
-    const citations = [...new Map([...citedDocuments, ...answerCitations].map((document) => [document.id, document])).values()];
-    if (!answer || !citations.length) {
-      return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, uniqueDocuments, "GLM 5.2 returned an answer without verifiable evidence citations; used source-only retrieval."));
+    const answerValidation = validateGroundedAnswer(answer, uniqueDocuments);
+    const citations = answerValidation.valid
+      ? allowedCitations(uniqueDocuments, answerValidation.citationIds)
+      : [];
+    if (!answer || !answerValidation.valid || !citations.length) {
+      const reason = answerValidation.reason
+        ? `GLM 5.2 failed grounding validation because ${answerValidation.reason}; used source-only retrieval.`
+        : "GLM 5.2 returned an answer without verifiable evidence citations; used source-only retrieval.";
+      return completeGroundedAgentTurn(session, userMessage, extractiveAnswer(session, userQuestion, uniqueDocuments, reason));
     }
 
     return completeGroundedAgentTurn(session, userMessage, {

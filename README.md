@@ -29,6 +29,7 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 - `/results` contains only real public web results returned through Bright Data discovery.
 - No local or generated creator profiles are used as fallback results.
 - The discovery agent can ask for missing campaign context and launch a real Bright Data search before any results exist.
+- The conversation is the primary discovery surface; the structured search controls remain available as an optional manual path.
 - Product-only requests receive one strategic intake question about audience, desired action, and credible creator-content format before discovery.
 - A requested TikTok, Instagram, or YouTube channel is enforced in both the live query and returned creator set.
 - Source match scores are ranking aids, not verified social-platform analytics.
@@ -42,7 +43,19 @@ Only the Supabase publishable key is shipped to the browser. Provider and Supaba
 - Membership changes and account export/deletion requests use audited server workflows; browser clients cannot write those records directly.
 - Every workspace receives an operator-controlled pilot entitlement with seat and monthly research limits; customers cannot grant or expand their own access.
 - Provider diagnostics retain only status, timing, source counts, model identifiers, and sanitized errors. API keys and raw prompts are excluded.
+- Duplicate creator records are collapsed by public source, platform handle, or profile identity before ranking.
+- Public source text is treated as untrusted data. Instruction-like text is removed, and unsafe or uncited model answers fall back to deterministic source-only output.
+- Visible view counts are never converted into inferred engagement, reach, sales, or conversion claims.
 - No private contact data, private analytics, or campaign performance is inferred.
+
+## Quality Checks
+
+```bash
+pnpm test:agent-evals
+pnpm check
+```
+
+The agent evaluation suite uses fixed source fixtures across ergonomic technology, skincare, hydration, meal kits, and pet care. It blocks regressions in ranking stability, duplicate handling, citation validity, unsupported claims, and prompt-injection resistance.
 
 ## Database
 
@@ -54,7 +67,7 @@ supabase db reset
 pnpm test:db
 ```
 
-The database suite currently covers 134 tenant-isolation, role, invitation, account, durable-agent-memory, campaign-brief, approval, task, campaign, outreach, entitlement, seat-limit, and provider-diagnostic assertions. Apply the migrations to a cloud project only after choosing the intended Supabase organization and environment.
+The database suite currently covers 165 tenant-isolation, role, invitation, account, durable-agent-memory, campaign-brief, approval, task, campaign, outreach, entitlement, seat-limit, and provider-diagnostic assertions. Apply the migrations to a cloud project only after choosing the intended Supabase organization and environment.
 
 Local team invitations are share links and do not send email. Connect reviewed SMTP or an email provider only when the hosted Supabase environment is configured.
 
@@ -64,7 +77,7 @@ Platform users with `app_metadata.platform_role` set to `operator` or `admin` ca
 
 ## Demo Path
 
-1. Choose **Plan with AI agent** and describe what you are promoting. The agent asks for the highest-value missing campaign context.
+1. On the home screen, tell the creator discovery agent what you are promoting and the outcome you need. The agent asks only for missing high-value campaign context.
 2. Let the agent launch its `find_creators` tool and wait for the real Bright Data results.
 3. Ask the same agent to compare the strongest fits and inspect its cited source records.
 4. Open **Brief** to generate, edit, submit, and approve the structured campaign brief.

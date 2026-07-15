@@ -17,7 +17,6 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
 } from "lucide-react";
 import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { AuthScreen } from "./components/AuthScreen";
@@ -641,13 +640,31 @@ export default function App() {
           </div>
         ) : null}
 
+        {path === "/" || resultsVisible ? (
+          <CampaignCopilot
+            variant={path === "/" ? "embedded" : "floating"}
+            session={researchSession}
+            initialMessages={restoredAgentMessages}
+            product={searchState.product || formState.product || "this product"}
+            configured={Boolean(integrationStatus?.campaignAgent?.configured)}
+            navigate={navigate}
+            currentSearch={formState}
+            onStartSearch={startAgentResearch}
+            onCreatorSaved={(sourceUrl, creatorName) => {
+              setShortlistedUrls((current) => new Set(current).add(sourceUrl));
+              setSaveMessage(`${creatorName} was saved to your workspace shortlist.`);
+            }}
+            researchLoading={realInfluencersLoading || intelligenceLoading}
+            researchError={realInfluencersError || intelligenceError}
+          />
+        ) : null}
+
         {path === "/" ? (
           <SearchScreen
             formState={formState}
             setFormState={setFormState}
             validationError={validationError}
             submitSearch={submitSearch}
-            integrationStatus={integrationStatus}
           />
         ) : null}
 
@@ -766,23 +783,6 @@ export default function App() {
         />
       ) : null}
 
-      {path === "/" || resultsVisible ? (
-        <CampaignCopilot
-          session={researchSession}
-          initialMessages={restoredAgentMessages}
-          product={searchState.product || formState.product || "this product"}
-          configured={Boolean(integrationStatus?.campaignAgent?.configured)}
-          navigate={navigate}
-          currentSearch={formState}
-          onStartSearch={startAgentResearch}
-          onCreatorSaved={(sourceUrl, creatorName) => {
-            setShortlistedUrls((current) => new Set(current).add(sourceUrl));
-            setSaveMessage(`${creatorName} was saved to your workspace shortlist.`);
-          }}
-          researchLoading={realInfluencersLoading || intelligenceLoading}
-          researchError={realInfluencersError || intelligenceError}
-        />
-      ) : null}
     </div>
   );
 }
@@ -864,34 +864,26 @@ function SearchScreen({
   formState,
   setFormState,
   validationError,
-  submitSearch,
-  integrationStatus
+  submitSearch
 }: {
   formState: SearchState;
   setFormState: (next: SearchState) => void;
   validationError: string;
   submitSearch: (event: FormEvent) => void;
-  integrationStatus: IntegrationStatus | null;
 }) {
   return (
-    <section className="showcase-grid">
-      <div className="hero-panel">
-        <div className="hero-copy">
-          <p className="eyebrow">Audience demand search</p>
-          <h1>Find creators with audiences already leaning toward your product.</h1>
-          <p>
-            Rank creator fit, source public evidence, build a shortlist, and move into outreach from one calm workspace.
-          </p>
-          <button
-            className="agent-primary-launch"
-            type="button"
-            onClick={() => window.dispatchEvent(new Event("creatorsignal:open-agent"))}
-          >
-            <Sparkles className="h-4 w-4" />
-            Plan with AI agent
-          </button>
-        </div>
-
+    <details className="manual-search-panel">
+      <summary>
+        <span>
+          <SlidersHorizontal className="h-4 w-4" />
+          <span>
+            <strong>Manual search</strong>
+            <small>Use structured campaign controls</small>
+          </span>
+        </span>
+        <span className="manual-search-badge">Optional</span>
+      </summary>
+      <div className="manual-search-content">
         <form className="creator-command" onSubmit={submitSearch}>
           <label className="field-label" htmlFor="product-search">
             Product or category
@@ -934,44 +926,8 @@ function SearchScreen({
             />
           </div>
         </form>
-
-        <div className="source-promise-grid" aria-label="Real creator discovery workflow">
-          {[
-            ["Bright Data", "Searches live public web results for creator evidence."],
-            ["Source links", "Every creator card must trace back to a visible public result."],
-            ["GLM analysis", "NVIDIA NIM scores source-backed cards and powers the grounded campaign copilot."],
-            ["Real-only results", "Seeded demo profiles are excluded from discovery."]
-          ].map(([label, description]) => (
-            <div className="source-promise-card" key={label}>
-              <span className="status-light status-light-on" />
-              <div>
-                <strong>{label}</strong>
-                <p>{description}</p>
-              </div>
-            </div>
-          ))}
-        </div>
       </div>
-
-      <aside className="preview-rail">
-        <IntegrationPanel status={integrationStatus} />
-        <div className="surface p-5">
-          <h2 className="section-title">Real-Only Discovery</h2>
-          <div className="mt-5 grid gap-3">
-            {[
-              ["Live", "Bright Data source search"],
-              ["Real", "Public creator evidence"],
-              ["Clean", "Seeded demo profiles excluded"]
-            ].map(([value, label]) => (
-              <div className="stat-row" key={label}>
-                <strong>{value}</strong>
-                <span>{label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </aside>
-    </section>
+    </details>
   );
 }
 
@@ -1739,51 +1695,6 @@ function IntegrationUseFlags({ intelligence }: { intelligence: ProductIntelligen
         AI provider {intelligence.openaiAgents.used ? "used for summary" : "not used for this run"}
       </div>
       <p className="text-muted">{intelligence.openaiAgents.note}</p>
-    </div>
-  );
-}
-
-function IntegrationPanel({ status }: { status: IntegrationStatus | null }) {
-  return (
-    <div className="surface p-5">
-      <h2 className="section-title">Integration Readiness</h2>
-      <div className="mt-4 space-y-3">
-        <ReadinessRow
-          label="Bright Data API"
-          ready={Boolean(status?.brightData.configured)}
-          detail={status?.brightData.configured ? `SERP zone ready, ${status.brightData.country.toUpperCase()} search` : "Missing local server config"}
-        />
-        <ReadinessRow
-          label="AI provider"
-          ready={Boolean(status?.openaiAgents.configured)}
-          detail={status?.openaiAgents.configured ? `${status.openaiAgents.displayName}: ${status.openaiAgents.model} configured` : "Add NVIDIA_API_KEY, GOOGLE_API_KEY, or OPENAI_API_KEY to enable live AI extraction"}
-        />
-        <ReadinessRow
-          label="Campaign copilot"
-          ready={Boolean(status?.campaignAgent?.configured)}
-          detail={status?.campaignAgent?.configured ? `${status.campaignAgent.displayName}, grounded in Bright Data sessions` : "Add NVIDIA_API_KEY to enable GLM 5.2 chat; source-only retrieval remains available"}
-        />
-        <ReadinessRow
-          label="Saved workspace"
-          ready={Boolean(status?.workspace?.configured && status.workspace.persistenceConfigured)}
-          detail={status?.workspace?.configured && status.workspace.persistenceConfigured ? "Supabase Auth, RLS, and durable server persistence ready" : "Connect a Supabase project to enable accounts and saved work"}
-        />
-      </div>
-      <p className="mt-4 text-xs leading-5 text-muted">
-        Provider secrets stay on the API. Real influencer discovery uses public web sources returned by Bright Data.
-      </p>
-    </div>
-  );
-}
-
-function ReadinessRow({ label, ready, detail }: { label: string; ready: boolean; detail: string }) {
-  return (
-    <div className="readiness-row">
-      <span className={`status-light ${ready ? "status-light-on" : ""}`} />
-      <div>
-        <p className="text-sm font-medium">{label}</p>
-        <p className="text-xs text-muted">{detail}</p>
-      </div>
     </div>
   );
 }

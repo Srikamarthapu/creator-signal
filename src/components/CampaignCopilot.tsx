@@ -40,10 +40,12 @@ const groundedPrompts = [
 ];
 
 const discoveryPrompts = [
-  "Find creators for a product launch.",
+  "We’re launching an ergonomic mouse for remote workers.",
   "Help me define the right creator profile.",
   "I need creators who can drive sales."
 ];
+
+type CampaignCopilotVariant = "floating" | "embedded";
 
 const CampaignBriefWorkspace = lazy(() => import("./CampaignBriefWorkspace").then((module) => ({ default: module.CampaignBriefWorkspace })));
 
@@ -69,7 +71,8 @@ export function CampaignCopilot({
   onStartSearch,
   onCreatorSaved,
   researchLoading,
-  researchError
+  researchError,
+  variant = "floating"
 }: {
   session: ResearchSessionMeta | null;
   initialMessages: CampaignAgentMessage[];
@@ -81,9 +84,11 @@ export function CampaignCopilot({
   onCreatorSaved: (sourceUrl: string, creatorName: string) => void;
   researchLoading: boolean;
   researchError: string;
+  variant?: CampaignCopilotVariant;
 }) {
   const auth = useAuth();
-  const [open, setOpen] = useState(false);
+  const embedded = variant === "embedded";
+  const [open, setOpen] = useState(embedded);
   const [view, setView] = useState<"chat" | "brief">("chat");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<CampaignAgentMessage[]>([]);
@@ -167,10 +172,21 @@ export function CampaignCopilot({
   }, [auth.activeOrganization?.id, session?.conversationId]);
 
   useEffect(() => {
-    const openAgent = () => setOpen(true);
+    if (embedded) setOpen(true);
+  }, [embedded]);
+
+  useEffect(() => {
+    const openAgent = () => {
+      if (embedded) {
+        inputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        window.setTimeout(() => inputRef.current?.focus(), 180);
+        return;
+      }
+      setOpen(true);
+    };
     window.addEventListener("creatorsignal:open-agent", openAgent);
     return () => window.removeEventListener("creatorsignal:open-agent", openAgent);
-  }, []);
+  }, [embedded]);
 
   useEffect(() => {
     const pendingSearchId = pendingSearchIdRef.current;
@@ -218,7 +234,7 @@ export function CampaignCopilot({
   }, [researchError, researchLoading, session]);
 
   useEffect(() => {
-    if (!open) return;
+    if (embedded || !open) return;
     const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 180);
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -231,7 +247,7 @@ export function CampaignCopilot({
       window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [open]);
+  }, [embedded, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -241,6 +257,7 @@ export function CampaignCopilot({
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const close = () => {
+    if (embedded) return;
     setOpen(false);
     window.setTimeout(() => triggerRef.current?.focus(), 0);
   };
@@ -322,6 +339,7 @@ export function CampaignCopilot({
         };
         setMessages((current) => [...current, assistantMessage]);
         if (data.action === "search" && data.searchPlan) {
+          setOpen(true);
           const researchSessionId = messageId();
           pendingSearchIdRef.current = researchSessionId;
           previousResearchLoadingRef.current = false;
@@ -457,31 +475,14 @@ export function CampaignCopilot({
   const ready = Boolean(session?.sourceCount && session.creatorCount);
   const buttonLabel = researchLoading ? "Searching live sources" : ready ? "Ask discovery agent" : "Plan with AI agent";
 
-  return (
-    <>
-      <button
-        ref={triggerRef}
-        className="copilot-trigger"
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-controls="campaign-copilot"
-      >
-        {researchLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : ready ? <MessageSquareText className="h-5 w-5" /> : <Sparkles className="h-5 w-5" />}
-        <span>{buttonLabel}</span>
-        <small>{ready ? `${session?.sourceCount} sources` : researchLoading ? "Bright Data" : "Start here"}</small>
-      </button>
-
-      {open ? (
-        <div className="copilot-layer" onMouseDown={(event) => event.target === event.currentTarget && close()}>
-          <aside
-            id="campaign-copilot"
-            className={`copilot-panel ${view === "brief" ? "copilot-panel-brief" : ""}`}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="campaign-copilot-title"
-          >
+  const panel = (
+    <aside
+      id="campaign-copilot"
+      className={`copilot-panel ${embedded ? "copilot-panel-embedded" : ""} ${view === "brief" ? "copilot-panel-brief" : ""}`}
+      role={embedded ? "region" : "dialog"}
+      aria-modal={embedded ? undefined : true}
+      aria-labelledby="campaign-copilot-title"
+    >
             <header className="copilot-header">
               <div className="copilot-title-row">
                 <span className="copilot-icon" aria-hidden="true">
@@ -496,9 +497,11 @@ export function CampaignCopilot({
                 <button className="ghost-icon-button" type="button" onClick={clearThread} aria-label="Clear campaign copilot conversation" title="Clear conversation">
                   <RotateCcw className="h-4 w-4" />
                 </button>
-                <button className="ghost-icon-button" type="button" onClick={close} aria-label="Close campaign copilot">
-                  <X className="h-5 w-5" />
-                </button>
+                {!embedded ? (
+                  <button className="ghost-icon-button" type="button" onClick={close} aria-label="Close campaign copilot">
+                    <X className="h-5 w-5" />
+                  </button>
+                ) : null}
               </div>
             </header>
 
@@ -534,11 +537,11 @@ export function CampaignCopilot({
               {!messages.length ? (
                 <div className="copilot-welcome">
                   <div className="copilot-welcome-icon"><MessageSquareText className="h-6 w-6" /></div>
-                  <h3>{ready ? "Choose from evidence, not guesswork." : "Tell me who you need to reach."}</h3>
+                  <h3>{ready ? "Choose from evidence, not guesswork." : "What are you promoting?"}</h3>
                   <p>
                     {ready
                       ? `I can compare the current ${product || "creator"} results, inspect evidence, surface risks, and help build a shortlist without stepping outside this research session.`
-                      : "Describe the product, audience, campaign goal, budget, and any creator preferences. I’ll shape the search, launch Bright Data, and then help you compare only the creators it actually returns."}
+                      : "Start with the product, audience, outcome, or creator style already on your mind. I’ll ask for the missing context that matters before searching."}
                   </p>
                 </div>
               ) : null}
@@ -789,7 +792,41 @@ export function CampaignCopilot({
               </div>
               <p>{ready ? "Recommendations stay tied to linked public evidence." : "The agent will ask only for details that improve discovery."}</p>
             </form> : null}
-          </aside>
+    </aside>
+  );
+
+  if (embedded) {
+    return (
+      <section className="agent-discovery-workspace" aria-labelledby="agent-discovery-title">
+        <header className="agent-discovery-heading">
+          <p className="eyebrow">AI creator strategist</p>
+          <h1 id="agent-discovery-title">Who should represent your next campaign?</h1>
+          <p>Start with what you’re promoting and the outcome you need. The agent will shape the brief with you, then search real public creator sources.</p>
+        </header>
+        {panel}
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        className="copilot-trigger"
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls="campaign-copilot"
+      >
+        {researchLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : ready ? <MessageSquareText className="h-5 w-5" /> : <Sparkles className="h-5 w-5" />}
+        <span>{buttonLabel}</span>
+        <small>{ready ? `${session?.sourceCount} sources` : researchLoading ? "Bright Data" : "Start here"}</small>
+      </button>
+
+      {open ? (
+        <div className="copilot-layer" onMouseDown={(event) => event.target === event.currentTarget && close()}>
+          {panel}
         </div>
       ) : null}
     </>
